@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"log"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -99,7 +101,7 @@ func NewRadio(sensor *g7.Sensor, maxConnections int) (*Radio, error) {
 	interval := uint16(sensor.Timing.AdvertisingInterval / (625 * time.Microsecond))
 	d, err := gatt.NewDevice(
 		gatt.LnxMaxConnections(maxConnections),
-		gatt.LnxDeviceID(-1, true),
+		gatt.LnxDeviceID(adapterID(), true),
 		gatt.LnxSetAdvertisingParameters(&cmd.LESetAdvertisingParameters{
 			AdvertisingIntervalMin: interval,
 			AdvertisingIntervalMax: interval,
@@ -284,4 +286,14 @@ func (r *Radio) Run() {
 			log.Printf("advertising %s: %v", mode, err)
 		}
 	}
+}
+
+// adapterID is the HCI index in G7SIM_HCI, or -1 for the first free adapter. Pin it when another
+// emulator shares the machine: the first-free search resets an adapter that is already up, which
+// can be the other emulator's.
+func adapterID() int {
+	if n, err := strconv.Atoi(os.Getenv("G7SIM_HCI")); err == nil {
+		return n
+	}
+	return -1
 }
