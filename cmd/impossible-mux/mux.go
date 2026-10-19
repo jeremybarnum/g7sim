@@ -3,8 +3,11 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
+	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -43,13 +46,7 @@ func str(msg map[string]interface{}, key string) string {
 	return s
 }
 
-type mux struct {
-	providers []string
-	suspend   suspender // set: the app is stopped while iOS would have it suspended
-
-	mu      sync.Mutex
-	current *session
-}
+func now() float64 { return float64(time.Now().UnixNano())/1e9 - 978307200 }
 
 // suspender is suspend.Suspender's part the mux uses.
 type suspender interface {
@@ -58,84 +55,286 @@ type suspender interface {
 	Wake(pid int)
 }
 
-func newMux(providers []string, s suspender) *mux {
-	return &mux{providers: providers, suspend: s}
-}
+// mux connects every app on ImpossiBLE's socket to every provider. Each
+// provider sees one client; the apps share it. A peripheral has one link, as
+// over the air: the app that holds it talks to it, and another app's connect
+// waits until the holder lets go, as iOS keeps a connect pending until the
+// peripheral advertises again.
+type mux struct {
+	providers []string
+	suspend   suspender // set: each app is stopped while iOS would have it suspended
 
-// serve connects an app to every provider. A new app takes over from the
-// previous one, as with a single provider.
-func (m *mux) serve(conn net.Conn) {
-	s := &session{
-		mux:       m,
-		app:       &line{conn: conn},
-		backends:  make([]*line, len(m.providers)),
-		owner:     map[string]int{},
-		pending:   map[string]map[int]bool{},
-		connected: map[string]int{},
-	}
-	m.mu.Lock()
-	old := m.current
-	m.current = s
-	m.mu.Unlock()
-	if old != nil {
-		log.Printf("a new app connected; dropping the previous one")
-		old.close()
-	}
-	for i := range m.providers {
-		go s.keepProvider(i)
-	}
-	readLines(conn, s.fromApp)
-	s.close()
-}
+	mu       sync.Mutex
+	apps     map[*app]bool
+	backends []*line // one connection per provider, nil while it is down
+	serving  bool    // the provider loops run while an app is connected
 
-// session is one app's connection and its connections to the providers.
-type session struct {
-	mux *mux
-	app *line
-
-	mu        sync.Mutex
-	closed    bool
-	hello     []byte
-	pid       int             // the app's, from its hello
-	scan      []byte          // the app's scan, while it scans
-	filter    map[string]bool // its service filter, canonical; empty: every advertisement
-	backends  []*line
+	hello     []byte                  // the first app's, repeated to a provider that joins late
+	lastHello *app                    // the app whose launch a provider's restored state answers
+	scan      []byte                  // the providers' scan, while any app scans
 	owner     map[string]int          // provider of each peripheral id
 	pending   map[string]map[int]bool // providers asked to connect to a peripheral no one has claimed yet
-	connected map[string]int          // peripherals connected to the app, by provider
+	holder    map[string]*app         // the app connecting to, or connected with, a peripheral
+	connected map[string]bool         // the holder's link is up
+	holdRaw   map[string][]byte       // the holder's connect, to re-queue it when it goes out of range
+	waiting   map[string][]*held      // apps whose connect waits for the holder to let go
+	asked     *app                    // the app whose mock configuration the providers answer
+
+	// Out of range, set from the API: an app out of range of everything (its
+	// phone's radios off, its watch away), a provider out of range of every
+	// app (the pod unplugged). A link that goes out of range drops; a connect
+	// out of range waits, as iOS keeps it pending; advertisements don't arrive.
+	away    map[string]bool // app bundle ids
+	dark    map[int]bool    // provider indices
+	cutting map[string]bool // links the mux dropped, until the provider confirms
+
+	// The last advertisement of each peripheral with no link up. A peripheral advertises all the
+	// while it is unconnected; a provider reports it only when a scan starts or a link drops, so
+	// the mux repeats it to an app that starts scanning or comes back in range.
+	adverts map[string]advert
 }
 
-func (s *session) close() {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return
+type advert struct {
+	raw []byte
+	msg map[string]interface{}
+}
+
+// held is a connect the mux keeps until the peripheral is free.
+type held struct {
+	app *app
+	raw []byte
+}
+
+// app is one app's connection to the mux.
+type app struct {
+	line   *line
+	closed bool
+	pid    int
+	bundle string
+	scan   []byte          // its scan, while it scans
+	filter map[string]bool // its service filter, canonical; empty: every advertisement
+}
+
+func newMux(providers []string, s suspender) *mux {
+	return &mux{
+		providers: providers,
+		suspend:   s,
+		apps:      map[*app]bool{},
+		backends:  make([]*line, len(providers)),
+		owner:     map[string]int{},
+		pending:   map[string]map[int]bool{},
+		holder:    map[string]*app{},
+		connected: map[string]bool{},
+		holdRaw:   map[string][]byte{},
+		waiting:   map[string][]*held{},
+		away:      map[string]bool{},
+		dark:      map[int]bool{},
+		cutting:   map[string]bool{},
+		adverts:   map[string]advert{},
 	}
-	s.closed = true
-	backends, pid := s.backends, s.pid
-	s.mu.Unlock()
-	if s.mux.suspend != nil && pid > 0 {
-		s.mux.suspend.Detach(pid)
-	}
-	s.app.conn.Close()
-	// Each provider sees the app end, as it would without the mux.
-	for _, b := range backends {
-		if b != nil {
-			b.conn.Close()
+}
+
+// advertTo sends app a the advertisements it would hear now: peripherals with no link up, in
+// range of it, that its scan matches. Called without the lock.
+func (m *mux) advertTo(a *app) {
+	m.mu.Lock()
+	var out [][]byte
+	if a.scan != nil && !a.closed {
+		for id, ad := range m.adverts {
+			if m.holder[id] != nil || m.blocked(a, id) || !a.matchesScan(ad.msg) {
+				continue
+			}
+			out = append(out, ad.raw)
 		}
 	}
+	m.mu.Unlock()
+	for _, raw := range out {
+		a.line.send(raw)
+	}
+}
+
+// blocked says whether app a is out of range of peripheral id. Called with
+// the lock held.
+func (m *mux) blocked(a *app, id string) bool {
+	if m.away[a.bundle] {
+		return true
+	}
+	o, ok := m.owner[id]
+	return ok && m.dark[o]
+}
+
+// nextWaiting takes the first waiting connect for id whose app is in range,
+// and makes its app the holder. Called with the lock held.
+func (m *mux) nextWaiting(id string) *held {
+	for k, h := range m.waiting[id] {
+		if !h.app.closed && !m.blocked(h.app, id) {
+			m.waiting[id] = append(append([]*held(nil), m.waiting[id][:k]...), m.waiting[id][k+1:]...)
+			m.holder[id] = h.app
+			m.holdRaw[id] = h.raw
+			return h
+		}
+	}
+	return nil
+}
+
+// Range is the out-of-range state the API reads and sets.
+type Range struct {
+	Away []string `json:"away"` // apps out of range of everything
+	Dark []string `json:"dark"` // providers out of range of every app
+}
+
+func (m *mux) rangeState() Range {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r := Range{Away: []string{}, Dark: []string{}}
+	for b, on := range m.away {
+		if on {
+			r.Away = append(r.Away, b)
+		}
+	}
+	for i, on := range m.dark {
+		if on {
+			r.Dark = append(r.Dark, m.providers[i])
+		}
+	}
+	sort.Strings(r.Away)
+	return r
+}
+
+// setRange puts an app (bundle id) or a provider (a part of its socket path)
+// out of range or back. Links that go out of range drop at once, as at a
+// supervision timeout; connects that come back in range go through.
+func (m *mux) setRange(bundle, provider string, inRange bool) error {
+	m.mu.Lock()
+	if provider != "" {
+		found := false
+		for i, p := range m.providers {
+			if strings.Contains(p, provider) {
+				m.dark[i] = !inRange
+				found = true
+			}
+		}
+		if !found {
+			m.mu.Unlock()
+			return fmt.Errorf("no provider matches %q", provider)
+		}
+	}
+	if bundle != "" {
+		m.away[bundle] = !inRange
+	}
+	type event struct {
+		a   *app
+		msg map[string]interface{}
+	}
+	var events []event
+	var cancels []string
+	for id, h := range m.holder {
+		if !m.blocked(h, id) {
+			continue
+		}
+		if m.connected[id] {
+			events = append(events, event{h, map[string]interface{}{"type": "didDisconnect", "id": id,
+				"error": "The connection has timed out unexpectedly.", "timestamp": now(), "isReconnecting": false}})
+		} else if raw := m.holdRaw[id]; raw != nil {
+			// A connect not yet through stays pending, out of range.
+			m.waiting[id] = append([]*held{{h, raw}}, m.waiting[id]...)
+		}
+		delete(m.holder, id)
+		delete(m.connected, id)
+		m.cutting[id] = true
+		cancels = append(cancels, id)
+	}
+	var dispatch []string
+	if inRange {
+		for id, hs := range m.waiting {
+			if len(hs) > 0 && m.holder[id] == nil && !m.cutting[id] {
+				dispatch = append(dispatch, id)
+			}
+		}
+	}
+	m.mu.Unlock()
+	log.Printf("range: app %q provider %q in range %v", bundle, provider, inRange)
+	for _, e := range events {
+		m.toApp(e.a, e.msg)
+	}
+	for _, id := range cancels {
+		m.mu.Lock()
+		to := m.targets(id)
+		m.mu.Unlock()
+		raw, _ := json.Marshal(map[string]interface{}{"type": "cancel", "id": id})
+		m.sendTo(to, raw)
+		id := id
+		// A provider that does not answer the cancel frees the link anyway.
+		time.AfterFunc(1500*time.Millisecond, func() { m.cutDone(id) })
+	}
+	for _, id := range dispatch {
+		m.dispatch(id)
+	}
+	if inRange {
+		for _, a := range m.appsList() {
+			m.advertTo(a)
+		}
+	}
+	return nil
+}
+
+// cutDone ends a link the mux dropped, and lets a waiting connect in.
+func (m *mux) cutDone(id string) {
+	m.mu.Lock()
+	if !m.cutting[id] {
+		m.mu.Unlock()
+		return
+	}
+	delete(m.cutting, id)
+	m.mu.Unlock()
+	m.dispatch(id)
+}
+
+// dispatch sends the next in-range waiting connect for a free peripheral.
+func (m *mux) dispatch(id string) {
+	m.mu.Lock()
+	if m.holder[id] != nil || m.cutting[id] {
+		m.mu.Unlock()
+		return
+	}
+	next := m.nextWaiting(id)
+	var to []int
+	if next != nil {
+		to = m.targets(id)
+	}
+	m.mu.Unlock()
+	if next != nil {
+		m.sendTo(to, next.raw)
+	}
+}
+
+// serve connects an app. The providers are kept while any app is there.
+func (m *mux) serve(conn net.Conn) {
+	a := &app{line: &line{conn: conn}}
+	m.mu.Lock()
+	m.apps[a] = true
+	start := !m.serving
+	m.serving = true
+	m.mu.Unlock()
+	if start {
+		for i := range m.providers {
+			go m.keepProvider(i)
+		}
+	}
+	readLines(conn, func(raw []byte, msg map[string]interface{}) { m.fromApp(a, raw, msg) })
+	m.appGone(a)
 }
 
 // keepProvider connects to provider i and reconnects when it restarts, for
-// as long as the app is there.
-func (s *session) keepProvider(i int) {
-	path := s.mux.providers[i]
+// as long as any app is there.
+func (m *mux) keepProvider(i int) {
+	path := m.providers[i]
 	reported := false
 	for {
-		s.mu.Lock()
-		closed := s.closed
-		s.mu.Unlock()
-		if closed {
+		m.mu.Lock()
+		serving := m.serving
+		m.mu.Unlock()
+		if !serving {
 			return
 		}
 		conn, err := net.Dial("unix", path)
@@ -149,16 +348,16 @@ func (s *session) keepProvider(i int) {
 		}
 		reported = false
 		b := &line{conn: conn}
-		s.mu.Lock()
-		if s.closed {
-			s.mu.Unlock()
+		m.mu.Lock()
+		if !m.serving {
+			m.mu.Unlock()
 			conn.Close()
 			return
 		}
-		s.backends[i] = b
+		m.backends[i] = b
 		// A provider that joins late sees the session as one that just began.
-		hello, scan := s.hello, s.scan
-		s.mu.Unlock()
+		hello, scan := m.hello, m.scan
+		m.mu.Unlock()
 		log.Printf("%s: connected", path)
 		if hello != nil {
 			b.send(hello)
@@ -166,56 +365,140 @@ func (s *session) keepProvider(i int) {
 		if scan != nil {
 			b.send(scan)
 		}
-		readLines(conn, func(raw []byte, msg map[string]interface{}) { s.fromProvider(i, raw, msg) })
-		s.providerGone(i)
+		readLines(conn, func(raw []byte, msg map[string]interface{}) { m.fromProvider(i, raw, msg) })
+		m.providerGone(i)
 		log.Printf("%s: disconnected", path)
 	}
 }
 
 // providerGone forgets a provider that went away. Its peripherals disconnect
-// from the app, as a device that powers off does.
-func (s *session) providerGone(i int) {
-	s.mu.Lock()
-	s.backends[i] = nil
-	for id, o := range s.owner {
-		if o == i {
-			delete(s.owner, id)
-		}
+// from their holders, as a device that powers off does, and the connects
+// waiting for them fail.
+func (m *mux) providerGone(i int) {
+	m.mu.Lock()
+	m.backends[i] = nil
+	type lost struct {
+		a   *app
+		msg map[string]interface{}
 	}
-	var lost []string
-	for id, o := range s.connected {
-		if o == i {
-			lost = append(lost, id)
-			delete(s.connected, id)
+	var out []lost
+	for id, o := range m.owner {
+		if o != i {
+			continue
 		}
+		delete(m.owner, id)
+		if a := m.holder[id]; a != nil {
+			if m.connected[id] {
+				out = append(out, lost{a, map[string]interface{}{"type": "didDisconnect", "id": id,
+					"error": "provider went away", "timestamp": now(), "isReconnecting": false}})
+			} else {
+				out = append(out, lost{a, map[string]interface{}{"type": "didFailConnect", "id": id, "error": "provider went away"}})
+			}
+			delete(m.holder, id)
+			delete(m.connected, id)
+		}
+		for _, h := range m.waiting[id] {
+			out = append(out, lost{h.app, map[string]interface{}{"type": "didFailConnect", "id": id, "error": "provider went away"}})
+		}
+		delete(m.waiting, id)
 	}
-	var failed []string
-	for id, pend := range s.pending {
-		if pend[i] {
-			delete(pend, i)
-			if len(pend) == 0 {
-				delete(s.pending, id)
-				failed = append(failed, id)
+	for id, pend := range m.pending {
+		if !pend[i] {
+			continue
+		}
+		delete(pend, i)
+		if len(pend) == 0 {
+			delete(m.pending, id)
+			if a := m.holder[id]; a != nil {
+				out = append(out, lost{a, map[string]interface{}{"type": "didFailConnect", "id": id, "error": "unknown peripheral"}})
+				delete(m.holder, id)
 			}
 		}
 	}
-	closed := s.closed
-	s.mu.Unlock()
-	if closed {
+	serving := m.serving
+	m.mu.Unlock()
+	if !serving {
 		return
 	}
-	for _, id := range lost {
-		s.toApp(map[string]interface{}{"type": "didDisconnect", "id": id, "error": "provider went away",
-			"timestamp": float64(time.Now().UnixNano())/1e9 - 978307200, "isReconnecting": false})
-	}
-	for _, id := range failed {
-		s.toApp(map[string]interface{}{"type": "didFailConnect", "id": id, "error": "unknown peripheral"})
+	for _, l := range out {
+		m.toApp(l.a, l.msg)
 	}
 }
 
-func (s *session) live() []int {
+// appGone forgets an app that left. The links it held are cancelled, so the
+// peripherals advertise again for the others; with no app left, every
+// provider sees its client end, as it would without the mux.
+func (m *mux) appGone(a *app) {
+	m.mu.Lock()
+	if a.closed {
+		m.mu.Unlock()
+		return
+	}
+	a.closed = true
+	delete(m.apps, a)
+	pid := a.pid
+	log.Printf("app %s (pid %d) left; %d app(s)", a.bundle, a.pid, len(m.apps))
+	var cancels []struct {
+		to  []int
+		raw []byte
+	}
+	for id, h := range m.holder {
+		if h != a {
+			continue
+		}
+		raw, _ := json.Marshal(map[string]interface{}{"type": "cancel", "id": id})
+		cancels = append(cancels, struct {
+			to  []int
+			raw []byte
+		}{m.targets(id), raw})
+		// The provider's didDisconnect, with no holder to take it, lets the next app in.
+	}
+	for id, hs := range m.waiting {
+		m.waiting[id] = without(hs, a)
+	}
+	last := len(m.apps) == 0
+	var backends []*line
+	if last {
+		m.serving = false
+		backends, m.backends = m.backends, make([]*line, len(m.providers))
+		m.hello, m.scan, m.lastHello, m.asked = nil, nil, nil, nil
+		m.owner, m.pending = map[string]int{}, map[string]map[int]bool{}
+		m.holder, m.connected, m.waiting = map[string]*app{}, map[string]bool{}, map[string][]*held{}
+		m.holdRaw, m.cutting = map[string][]byte{}, map[string]bool{}
+		m.adverts = map[string]advert{}
+	}
+	m.mu.Unlock()
+	if m.suspend != nil && pid > 0 {
+		m.suspend.Detach(pid)
+	}
+	a.line.conn.Close()
+	if last {
+		for _, b := range backends {
+			if b != nil {
+				b.conn.Close()
+			}
+		}
+		return
+	}
+	for _, c := range cancels {
+		m.sendTo(c.to, c.raw)
+	}
+	m.rescan()
+}
+
+func without(hs []*held, a *app) []*held {
+	var out []*held
+	for _, h := range hs {
+		if h.app != a {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+func (m *mux) live() []int {
 	var out []int
-	for i, b := range s.backends {
+	for i, b := range m.backends {
 		if b != nil {
 			out = append(out, i)
 		}
@@ -223,177 +506,412 @@ func (s *session) live() []int {
 	return out
 }
 
-func (s *session) sendTo(indices []int, raw []byte) {
-	s.mu.Lock()
+// targets names the providers a peripheral's request goes to: its owner, or
+// every provider asked to find it. Called with the lock held.
+func (m *mux) targets(id string) []int {
+	if o, ok := m.owner[id]; ok {
+		return []int{o}
+	}
+	var out []int
+	for i := range m.pending[id] {
+		out = append(out, i)
+	}
+	return out
+}
+
+func (m *mux) sendTo(indices []int, raw []byte) {
+	m.mu.Lock()
 	var targets []*line
 	for _, i := range indices {
-		if b := s.backends[i]; b != nil {
+		if b := m.backends[i]; b != nil {
 			targets = append(targets, b)
 		}
 	}
-	s.mu.Unlock()
+	m.mu.Unlock()
 	for _, b := range targets {
 		b.send(raw)
 	}
 }
 
-func (s *session) fromApp(raw []byte, msg map[string]interface{}) {
+// rescan sends the providers the apps' scans as one: every advertisement
+// any app's filter would match, or no scan when no app scans. The mux
+// filters each advertisement per app.
+func (m *mux) rescan() {
+	m.mu.Lock()
+	var scan []byte
+	scanning, filtered := false, true
+	union := map[string]bool{}
+	for a := range m.apps {
+		if a.scan == nil {
+			continue
+		}
+		scanning = true
+		if len(a.filter) == 0 {
+			filtered = false
+		}
+		for u := range a.filter {
+			union[u] = true
+		}
+	}
+	if scanning {
+		msg := map[string]interface{}{"type": "scan"}
+		if filtered {
+			var services []string
+			for u := range union {
+				services = append(services, u)
+			}
+			sort.Strings(services)
+			msg["services"] = services
+		}
+		scan, _ = json.Marshal(msg)
+	}
+	changed := string(scan) != string(m.scan)
+	m.scan = scan
+	all := m.live()
+	m.mu.Unlock()
+	if !changed {
+		return
+	}
+	if scan == nil {
+		scan, _ = json.Marshal(map[string]interface{}{"type": "stopScan"})
+	}
+	m.sendTo(all, scan)
+}
+
+// trace logs each request and event for a peripheral, with its holder (MUX_TRACE=1).
+var trace = os.Getenv("MUX_TRACE") != ""
+
+func (m *mux) traceLine(dir, who, t, id string) {
+	if !trace || id == "" || t == "didDiscover" || t == "scan" {
+		return
+	}
+	h := "none"
+	if a := m.holder[id]; a != nil {
+		h = a.bundle
+	}
+	log.Printf("trace %s %s %s %s holder=%s connected=%v cutting=%v waiting=%d", dir, who, t, id[:8], h, m.connected[id], m.cutting[id], len(m.waiting[id]))
+}
+
+func (m *mux) fromApp(a *app, raw []byte, msg map[string]interface{}) {
 	t, id := str(msg, "type"), str(msg, "id")
-	s.mu.Lock()
-	all := s.live()
+	m.mu.Lock()
+	m.traceLine("app>", a.bundle, t, id)
+	if a.closed {
+		m.mu.Unlock()
+		return
+	}
+	all := m.live()
 	var to []int
+	var reply map[string]interface{} // a Bluetooth event the mux makes up
 	switch {
 	case t == "hello":
-		s.hello = raw
-		to = all
-		if pid, _ := msg["pid"].(float64); pid > 0 && s.mux.suspend != nil {
-			s.pid = int(pid)
-			s.mux.suspend.Attach(s.pid, str(msg, "bundleId"))
+		a.bundle = str(msg, "bundleId")
+		if pid, _ := msg["pid"].(float64); pid > 0 {
+			a.pid = int(pid)
 		}
+		m.lastHello = a
+		log.Printf("app %s (pid %d) connected; %d app(s)", a.bundle, a.pid, len(m.apps))
+		// Each provider hears one client: the first app introduces it.
+		if m.hello == nil {
+			m.hello = raw
+			to = all
+		}
+		pid, bundle := a.pid, a.bundle
+		m.mu.Unlock()
+		if m.suspend != nil && pid > 0 {
+			m.suspend.Attach(pid, bundle)
+		}
+		m.sendTo(to, raw)
+		return
 	case t == "scan":
-		s.scan = raw
-		s.filter = map[string]bool{}
+		a.scan = raw
+		a.filter = map[string]bool{}
 		if services, ok := msg["services"].([]interface{}); ok {
 			for _, v := range services {
 				if u, ok := v.(string); ok {
-					s.filter[canonicalUUID(u)] = true
+					a.filter[canonicalUUID(u)] = true
 				}
 			}
 		}
-		to = all
+		m.mu.Unlock()
+		m.rescan()
+		m.advertTo(a)
+		return
 	case t == "stopScan":
-		s.scan, s.filter = nil, nil
+		a.scan, a.filter = nil, nil
+		m.mu.Unlock()
+		m.rescan()
+		return
+	case t == "setMockConfiguration" || t == "clearMockConfiguration":
+		m.asked = a
 		to = all
 	case id == "":
 		to = all
+	case t == "connect":
+		// Name the app, so a provider that tells centrals apart (the
+		// sensor's per-reading bookkeeping) sees each app as its own.
+		if a.bundle != "" {
+			msg["central"] = a.bundle
+			raw, _ = json.Marshal(msg)
+		}
+		switch h := m.holder[id]; {
+		case (h == nil || h == a) && (m.cutting[id] || m.blocked(a, id)):
+			// Out of range, or the link the mux dropped not yet gone: pending.
+			if h == a {
+				delete(m.holder, id)
+			}
+			m.waiting[id] = append(without(m.waiting[id], a), &held{a, raw})
+			m.mu.Unlock()
+			return
+		case h != nil && h != a:
+			// Held until the holder lets go, as iOS holds a connect until the
+			// peripheral advertises again.
+			m.waiting[id] = append(without(m.waiting[id], a), &held{a, raw})
+			m.mu.Unlock()
+			return
+		case h == a:
+			to = m.targets(id)
+		default:
+			m.holder[id] = a
+			m.holdRaw[id] = raw
+			delete(m.connected, id)
+			to = m.targets(id)
+			if len(to) == 0 && len(all) > 0 {
+				// The app knows this peripheral from before (retrieved, or
+				// restored); the provider that has it holds the connect and
+				// the others refuse it.
+				pend := map[int]bool{}
+				for _, i := range all {
+					pend[i] = true
+				}
+				m.pending[id] = pend
+				to = all
+			}
+		}
+	case t == "cancel":
+		if m.holder[id] == a {
+			to = m.targets(id)
+		} else if len(m.waiting[id]) != len(without(m.waiting[id], a)) {
+			m.waiting[id] = without(m.waiting[id], a)
+			reply = map[string]interface{}{"type": "didDisconnect", "id": id, "error": "", "timestamp": now(), "isReconnecting": false}
+		}
 	default:
-		if o, ok := s.owner[id]; ok {
-			to = []int{o}
-		} else if pend := s.pending[id]; pend != nil {
-			for i := range pend {
-				to = append(to, i)
-			}
-		} else if t == "connect" && len(all) > 0 {
-			// The app knows this peripheral from before (retrieved, or
-			// restored); the provider that has it holds the connect and
-			// the others refuse it.
-			pend := map[int]bool{}
-			for _, i := range all {
-				pend[i] = true
-			}
-			s.pending[id] = pend
-			to = all
+		// The holder's requests go to the provider, which answers for the
+		// link's state; another app's are refused here.
+		if m.holder[id] == a {
+			to = m.targets(id)
+		} else {
+			reply = notConnected(t, msg)
 		}
 	}
-	s.mu.Unlock()
+	m.mu.Unlock()
+	if reply != nil {
+		if trace {
+			log.Printf("trace mux> %s %s %v", a.bundle, str(reply, "type"), reply["error"])
+		}
+		m.toApp(a, reply)
+		return
+	}
 	if len(to) == 0 && id != "" {
 		switch t {
 		case "connect":
-			s.toApp(map[string]interface{}{"type": "didFailConnect", "id": id, "error": "unknown peripheral"})
+			m.mu.Lock()
+			if m.holder[id] == a {
+				delete(m.holder, id)
+			}
+			m.mu.Unlock()
+			m.toApp(a, map[string]interface{}{"type": "didFailConnect", "id": id, "error": "unknown peripheral"})
 		case "cancel":
-			s.toApp(map[string]interface{}{"type": "didDisconnect", "id": id, "error": "",
-				"timestamp": float64(time.Now().UnixNano())/1e9 - 978307200, "isReconnecting": false})
+			m.toApp(a, map[string]interface{}{"type": "didDisconnect", "id": id, "error": "", "timestamp": now(), "isReconnecting": false})
 		default:
 			log.Printf("app: %s for unknown peripheral %s dropped", t, id)
 		}
 		return
 	}
-	s.sendTo(to, raw)
+	m.sendTo(to, raw)
 }
 
-func (s *session) fromProvider(i int, raw []byte, msg map[string]interface{}) {
+// notConnected answers a request on a peripheral the app does not hold, as
+// CoreBluetooth answers a request on a disconnected peripheral.
+func notConnected(t string, msg map[string]interface{}) map[string]interface{} {
+	id := str(msg, "id")
+	reply := map[string]interface{}{"id": id, "error": "not connected"}
+	switch t {
+	case "discoverServices":
+		reply["type"] = "didDiscoverServices"
+	case "discoverCharacteristics":
+		reply["type"], reply["serviceId"] = "didDiscoverCharacteristics", str(msg, "serviceId")
+	case "discoverDescriptors":
+		reply["type"], reply["characteristicId"] = "didDiscoverDescriptors", str(msg, "characteristicId")
+	case "read":
+		reply["type"], reply["characteristicId"] = "didUpdateValue", str(msg, "characteristicId")
+	case "write":
+		reply["type"], reply["characteristicId"] = "didWriteValue", str(msg, "characteristicId")
+	case "setNotify":
+		reply["type"], reply["characteristicId"] = "didUpdateNotification", str(msg, "characteristicId")
+	case "readRSSI":
+		reply["type"] = "didReadRSSI"
+	default:
+		log.Printf("app: %s for %s, which it does not hold, dropped", t, id)
+		return nil
+	}
+	return reply
+}
+
+func (m *mux) fromProvider(i int, raw []byte, msg map[string]interface{}) {
 	t, id := str(msg, "type"), str(msg, "id")
-	s.mu.Lock()
-	forward := true
+	m.mu.Lock()
+	m.traceLine("<prov", m.providers[i], t, id)
+	var to []*app
+	var quietly []*app // apps that get the message without being woken
+	var next *held     // a waiting connect the peripheral is now free for
+	dispatchAfter := false
 	switch {
 	case t == "connectionRejected":
-		forward = false
-		log.Printf("%s refused the app: %s", s.mux.providers[i], str(msg, "message"))
+		log.Printf("%s refused the mux: %s", m.providers[i], str(msg, "message"))
 	case t == "didSetMockConfiguration":
 		// Every provider answers; the app asked once.
-		live := s.live()
-		forward = len(live) > 0 && live[0] == i
+		if live := m.live(); len(live) > 0 && live[0] == i && m.asked != nil {
+			to = []*app{m.asked}
+		}
 	case t == "didRestoreState":
 		if ids, ok := msg["peripheralIds"].([]interface{}); ok {
 			for _, v := range ids {
 				if p, ok := v.(string); ok {
-					s.owner[p] = i
+					m.owner[p] = i
 				}
 			}
 		}
+		if m.lastHello != nil {
+			to = []*app{m.lastHello}
+		}
+	case t == "didDiscover":
+		if _, ok := m.owner[id]; !ok && id != "" {
+			m.owner[id] = i
+		}
+		if id != "" {
+			m.adverts[id] = advert{raw, msg}
+		}
+		// The providers filter for every app at once; each app still gets
+		// every advertisement, as with one provider. iOS wakes an app for
+		// an advertisement only if it matches the app's own scan.
+		for a := range m.apps {
+			switch {
+			case a.scan == nil, m.blocked(a, id):
+			case a.matchesScan(msg):
+				to = append(to, a)
+			default:
+				quietly = append(quietly, a)
+			}
+		}
 	case id != "":
-		if pend := s.pending[id]; pend[i] {
+		forward := true
+		if pend := m.pending[id]; pend[i] {
 			if t == "didFailConnect" {
 				delete(pend, i)
 				switch len(pend) {
 				case 0:
-					delete(s.pending, id)
+					delete(m.pending, id)
 				case 1:
 					// The one left is holding the connect: it has the peripheral.
 					for o := range pend {
-						s.owner[id] = o
+						m.owner[id] = o
 					}
-					delete(s.pending, id)
+					delete(m.pending, id)
 					forward = false
 				default:
 					forward = false
 				}
-				break
+			} else {
+				m.owner[id] = i
+				delete(m.pending, id)
 			}
-			s.owner[id] = i
-			delete(s.pending, id)
-		} else if o, ok := s.owner[id]; ok && o != i {
+		} else if o, ok := m.owner[id]; ok && o != i {
 			forward = false
-			log.Printf("%s: %s for %s, which %s has, dropped", s.mux.providers[i], t, id, s.mux.providers[o])
+			log.Printf("%s: %s for %s, which %s has, dropped", m.providers[i], t, id, m.providers[o])
 		} else if !ok {
-			s.owner[id] = i
+			m.owner[id] = i
+		}
+		if forward && m.cutting[id] && (t == "didDisconnect" || t == "didFailConnect") {
+			// The end of a link the mux dropped: its app has heard already.
+			delete(m.cutting, id)
+			forward = false
+			dispatchAfter = true
 		}
 		if forward {
+			h := m.holder[id]
 			switch t {
 			case "didConnect":
-				s.connected[id] = i
+				m.connected[id] = true
+				delete(m.adverts, id)
 			case "didDisconnect", "didFailConnect":
-				delete(s.connected, id)
+				delete(m.holder, id)
+				delete(m.connected, id)
+				next = m.nextWaiting(id)
+			}
+			if h != nil && !h.closed {
+				to = []*app{h}
+			} else if t != "didDisconnect" && t != "didFailConnect" {
+				log.Printf("%s: %s for %s, which no app holds, dropped", m.providers[i], t, id)
 			}
 		}
+	default:
+		to = m.appsList()
 	}
-	// iOS wakes an app for an advertisement only if it matches the app's scan.
-	wake := t != "didDiscover" || s.matchesScan(msg)
-	s.mu.Unlock()
-	if forward {
-		if wake {
-			s.wakeApp()
-		}
-		s.app.send(raw)
+	var targets []int
+	if next != nil {
+		targets = m.targets(id)
+	}
+	m.mu.Unlock()
+	for _, a := range to {
+		m.wake(a)
+		a.line.send(raw)
+	}
+	for _, a := range quietly {
+		a.line.send(raw)
+	}
+	if next != nil {
+		m.sendTo(targets, next.raw)
+	}
+	if dispatchAfter {
+		m.dispatch(id)
 	}
 }
 
-// wakeApp gives a suspended app a Bluetooth event's run time, as bluetoothd
+func (m *mux) appsList() []*app {
+	var out []*app
+	for a := range m.apps {
+		out = append(out, a)
+	}
+	return out
+}
+
+// wake gives a suspended app a Bluetooth event's run time, as bluetoothd
 // does.
-func (s *session) wakeApp() {
-	s.mu.Lock()
-	pid := s.pid
-	s.mu.Unlock()
-	if s.mux.suspend != nil && pid > 0 {
-		s.mux.suspend.Wake(pid)
+func (m *mux) wake(a *app) {
+	if m.suspend != nil && a.pid > 0 {
+		m.suspend.Wake(a.pid)
 	}
 }
 
-// toApp sends the app a Bluetooth event the mux makes up for a provider.
-func (s *session) toApp(msg map[string]interface{}) {
+// toApp sends an app a Bluetooth event the mux makes up for a provider.
+func (m *mux) toApp(a *app, msg map[string]interface{}) {
 	b, _ := json.Marshal(msg)
-	s.wakeApp()
-	s.app.send(b)
+	m.wake(a)
+	a.line.send(b)
 }
 
-func (s *session) matchesScan(msg map[string]interface{}) bool {
-	if len(s.filter) == 0 {
-		return s.scan != nil
+func (a *app) matchesScan(msg map[string]interface{}) bool {
+	if a.scan == nil {
+		return false
+	}
+	if len(a.filter) == 0 {
+		return true
 	}
 	adv, _ := msg["adv"].(map[string]interface{})
 	services, _ := adv["kCBAdvDataServiceUUIDs"].([]interface{})
 	for _, v := range services {
-		if u, ok := v.(string); ok && s.filter[canonicalUUID(u)] {
+		if u, ok := v.(string); ok && a.filter[canonicalUUID(u)] {
 			return true
 		}
 	}
