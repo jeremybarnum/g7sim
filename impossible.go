@@ -38,7 +38,8 @@ type SimRadio struct {
 	mu       sync.Mutex
 	client   *simClient
 	scanning bool
-	pending  bool // the app asked to connect; held until the sensor advertises
+	pending  bool   // the app asked to connect; held until the sensor advertises
+	central  string // the address the pending connect comes from
 	link     *simLink
 	mode     g7.AdvertMode
 	tried    time.Time // last attempt to bring up a pending connection
@@ -373,6 +374,12 @@ func (r *SimRadio) handle(c *simClient, msg map[string]interface{}) {
 		r.mu.Lock()
 		if r.link == nil {
 			r.pending = true
+			// A mux serving several apps names the one asking, so each app is
+			// its own central to the sensor, as a phone and a watch are.
+			r.central = c.addr
+			if app := str(msg, "central"); app != "" {
+				r.central = centralAddr(app)
+			}
 			r.tried = time.Time{}
 			r.startAt = time.Now().Add(startDelay(msg))
 		}
@@ -549,7 +556,7 @@ func (r *SimRadio) setNotify(c *simClient, msg map[string]interface{}) {
 // refusal at the link layer does.
 func (r *SimRadio) tryConnect(now time.Time) {
 	r.mu.Lock()
-	c, mode := r.client, r.mode
+	c, mode, addr := r.client, r.mode, r.central
 	if !r.pending || c == nil || r.link != nil || mode == g7.AdvertOff || now.Sub(r.tried) < time.Second || now.Before(r.startAt) {
 		r.mu.Unlock()
 		return
@@ -557,10 +564,10 @@ func (r *SimRadio) tryConnect(now time.Time) {
 	r.tried = now
 	r.mu.Unlock()
 
-	if !r.sensor.LinkOpened(c.addr, now, mode) {
+	if !r.sensor.LinkOpened(addr, now, mode) {
 		return
 	}
-	l := &simLink{radio: r, client: c, addr: c.addr, events: make(chan event, 256), notifying: map[g7.Char]string{}}
+	l := &simLink{radio: r, client: c, addr: addr, events: make(chan event, 256), notifying: map[g7.Char]string{}}
 	r.mu.Lock()
 	if r.client != c || !r.pending {
 		r.mu.Unlock()
