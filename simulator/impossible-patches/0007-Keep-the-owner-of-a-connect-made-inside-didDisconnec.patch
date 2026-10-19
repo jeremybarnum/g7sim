@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jeremy Barnum <prefer not to supply>
+Date: Mon, 19 Oct 2026 17:38:31 -0400
+Subject: [PATCH] Keep the owner of a connect made inside didDisconnect
+
+On a disconnect or a failed connect, ImpossiBLE told the app and then
+forgot which central owns the peripheral. An app that connects again from
+inside that callback, as OmnipodKit's auto-reconnect does, had its new
+owner forgotten at once: when the connect later went through, the
+peripheral's service and characteristic results found no owner and were
+dropped, so the app waited on discovery forever and every command to the
+pod was refused. CoreBluetooth has no such ordering. The owner is now
+forgotten before the app is told.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Sources/ImpossiBLE/CBSActivator.m | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/Sources/ImpossiBLE/CBSActivator.m b/Sources/ImpossiBLE/CBSActivator.m
+index 219855a..3e524e1 100644
+--- a/Sources/ImpossiBLE/CBSActivator.m
++++ b/Sources/ImpossiBLE/CBSActivator.m
+@@ -988,20 +988,21 @@ static void cbs_handle_message(NSDictionary *msg) {
+                 [delegate centralManager:central didConnectPeripheral:cbPeripheral];
+             } else if ([type isEqualToString:@"didFailConnect"] &&
+                        [delegate respondsToSelector:@selector(centralManager:didFailToConnectPeripheral:error:)]) {
+-                [delegate centralManager:central didFailToConnectPeripheral:cbPeripheral error:err];
++                // Forgotten before the app hears, so a connect it makes in the callback keeps its owner.
+                 [gPeripheralOwners removeObjectForKey:uuid];
++                [delegate centralManager:central didFailToConnectPeripheral:cbPeripheral error:err];
+             } else if ([type isEqualToString:@"didDisconnect"] &&
+                        [delegate respondsToSelector:@selector(centralManager:didDisconnectPeripheral:timestamp:isReconnecting:error:)]) {
++                [gPeripheralOwners removeObjectForKey:uuid];
+                 [delegate centralManager:central
+                    didDisconnectPeripheral:cbPeripheral
+                                 timestamp:timestamp
+                            isReconnecting:isReconnecting
+                                     error:err];
+-                [gPeripheralOwners removeObjectForKey:uuid];
+             } else if ([type isEqualToString:@"didDisconnect"] &&
+                        [delegate respondsToSelector:@selector(centralManager:didDisconnectPeripheral:error:)]) {
+-                [delegate centralManager:central didDisconnectPeripheral:cbPeripheral error:err];
+                 [gPeripheralOwners removeObjectForKey:uuid];
++                [delegate centralManager:central didDisconnectPeripheral:cbPeripheral error:err];
+             }
+         });
+         return;
+-- 
+2.50.1 (Apple Git-155)
+
