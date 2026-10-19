@@ -124,7 +124,7 @@ Bluetooth permission, so it runs on any Mac, including a CI virtual machine.
 ```bash
 go build -o g7sim .
 ./g7sim -transport impossible -fresh -code 4321 -serial 7810293746
-simulator/build-impossible.sh        # prints the path of libImpossiBLE.dylib
+simulator/build-impossible.sh        # prints the paths of libImpossiBLE.dylib and libImpossiBLE-watch.dylib
 ```
 
 Loop needs no change to use it: ImpossiBLE is injected at launch.
@@ -166,6 +166,26 @@ Each provider sees the app as its only client. The mux sends the app's session-w
 connect to a peripheral it has not seen (one the app retrieved after a relaunch) goes to all,
 and the one that holds it owns it. A provider that restarts rejoins, and its peripherals
 disconnect from the app meanwhile, as a device that powers off does.
+
+Several apps can share the mux, such as Loop's phone app and its watch app in a paired pair of
+Simulators (inject `libImpossiBLE-watch.dylib` into the watch app). Each provider still sees one
+client. A peripheral has one link, as over the air: the app that holds it talks to it, another
+app's connect waits until the holder lets go, and its other requests are answered as on a
+disconnected peripheral. Each connect names its app, so g7sim treats each app as its own
+display, with its own share of every reading.
+
+With `-api :8087` an app or a provider can be taken out of range and brought back, for tests
+that need a phone away from its pod or a pod out of reach:
+
+```bash
+curl -X POST 'localhost:8087/range?app=<bundle id>&in=0'   # the app out of range
+curl -X POST 'localhost:8087/range?provider=pod&in=0'      # the pod out of range of every app
+curl 'localhost:8087/range'                                 # what is out of range
+```
+
+A link that goes out of range drops with a timeout, a connect waits, and the peripheral's last
+advertisement is repeated when the app is back. `MUX_TRACE=1` logs each request and event for a
+peripheral with the app that holds it.
 
 For [suspension](#background-wakes-suspension-and-termination), give `-suspend` to the mux
 rather than to g7sim, so every provider's messages wake the app:
