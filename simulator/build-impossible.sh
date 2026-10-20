@@ -25,7 +25,8 @@ git -C "$src" checkout --quiet --force "$commit"
 # missing a 16-bit advert (#4), subscriptions and services surviving a
 # disconnect (#5), retrievePeripheralsWithIdentifiers: forgetting
 # peripherals on relaunch (#6), and the owner of a connect made inside
-# didDisconnect forgotten (0007).
+# didDisconnect forgotten (0007), and a pending connect reading as
+# disconnected, so an app's cancel of it was skipped (0008).
 for patch in "$here"/impossible-patches/*.patch; do
 	git -C "$src" apply "$patch"
 done

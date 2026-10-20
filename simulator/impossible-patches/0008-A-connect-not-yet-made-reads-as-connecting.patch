@@ -1,0 +1,47 @@
+From eab2423c99386d4c018ced91cc798531eefc96cd Mon Sep 17 00:00:00 2001
+From: Jeremy Barnum <prefer not to supply>
+Date: Tue, 20 Oct 2026 00:48:00 -0400
+Subject: [PATCH] A connect not yet made reads as connecting
+
+As in CoreBluetooth, a peripheral whose connect is pending reads as
+connecting until the connect goes through or is cancelled, and a cancel
+ends it at once. ImpossiBLE left it reading as disconnected, so an app that
+cancels pending connects by their state (OmnipodKit, when it lets a pod go)
+skipped the cancel, and the connect went through later, when the app no
+longer expected it: the link came up with no session behind it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Sources/ImpossiBLE/CBSActivator.m | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/Sources/ImpossiBLE/CBSActivator.m b/Sources/ImpossiBLE/CBSActivator.m
+index 3e524e1..90f00b4 100644
+--- a/Sources/ImpossiBLE/CBSActivator.m
++++ b/Sources/ImpossiBLE/CBSActivator.m
+@@ -1800,6 +1800,11 @@ static void cbs_connect_peripheral(id self, SEL _cmd, id peripheral, NSDictionar
+             gPeripheralOwners = [NSMutableDictionary dictionary];
+         }
+         gPeripheralOwners[uuid] = cbs_central_key(central);
++        // As in CoreBluetooth, a connect not yet made reads as connecting until it goes through or
++        // is cancelled, so an app that cancels pending connects by their state finds this one.
++        if ([peripheral isKindOfClass:[CBSPeripheral class]] && [(CBSPeripheral *)peripheral state] == CBPeripheralStateDisconnected) {
++            [(CBSPeripheral *)peripheral cbs_setState:CBPeripheralStateConnecting];
++        }
+         CBSConnectionSend(@{@"type": @"connect", @"id": uuid.UUIDString, @"options": options ?: @{}});
+     }
+ }
+@@ -1819,6 +1824,10 @@ static void cbs_cancel(id self, SEL _cmd, id peripheral) {
+             gPeripheralOwners[uuid] = cbs_central_key(central);
+         }
+         CBSConnectionSend(@{@"type": @"cancel", @"id": uuid.UUIDString});
++        // A cancelled connect that never went through is over at once.
++        if ([peripheral isKindOfClass:[CBSPeripheral class]] && [(CBSPeripheral *)peripheral state] == CBPeripheralStateConnecting) {
++            [(CBSPeripheral *)peripheral cbs_setState:CBPeripheralStateDisconnected];
++        }
+     }
+ }
+ 
+-- 
+2.50.1 (Apple Git-155)
+
