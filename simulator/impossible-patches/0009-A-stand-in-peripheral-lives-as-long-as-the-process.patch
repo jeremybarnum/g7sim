@@ -1,0 +1,445 @@
+From 2a71b4da3fb76c176ddd38bf0e195b847f939403 Mon Sep 17 00:00:00 2001
+From: Jeremy Barnum <prefer not to supply>
+Date: Tue, 20 Oct 2026 11:57:02 -0400
+Subject: [PATCH] A stand-in peripheral lives as long as the process
+
+A CBPeripheral's own dealloc expects CoreBluetooth's bookkeeping: it
+removes an observer CoreBluetooth registered at creation, which a
+stand-in never had. When an app let a central manager go (rebuilding it
+after the provider went away), its stand-in peripherals were released,
+the removal threw, and the app aborted. Each stand-in is now kept for the
+life of the process; they are few and small.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ Sources/ImpossiBLE/CBSActivator.m             | 118 +++++++++++++++---
+ Sources/ImpossiBLE/CBSConnection.h            |   3 +
+ Sources/ImpossiBLE/CBSConnection.m            |   7 ++
+ Sources/ImpossiBLE/CBSProxies.m               |  28 ++++-
+ .../CentralLifecycleTests.swift               |  74 +++++++++++
+ 5 files changed, 209 insertions(+), 21 deletions(-)
+
+diff --git a/Sources/ImpossiBLE/CBSActivator.m b/Sources/ImpossiBLE/CBSActivator.m
+index f44eb06..90f00b4 100644
+--- a/Sources/ImpossiBLE/CBSActivator.m
++++ b/Sources/ImpossiBLE/CBSActivator.m
+@@ -18,6 +18,7 @@
+ static void *kCBSScanServiceFilterKey = &kCBSScanServiceFilterKey;
+ static void *kCBSScanWireOptionsKey = &kCBSScanWireOptionsKey;
+ static void *kCBSCentralKeyKey = &kCBSCentralKeyKey;
++static void *kCBSInitialStateReportedKey = &kCBSInitialStateReportedKey;
+ static CBCentralManager *cbs_owner_central_for_peripheral(NSUUID *identifier);
+ static NSArray<CBSPeripheral *> *cbs_all_peripherals_for_uuid(NSUUID *uuid);
+ static uint64_t gNextCentralId = 1;
+@@ -41,6 +42,10 @@
+ static void cbs_notify_all_centrals_state_changed(void) {
+     NSArray *centrals = gCentrals.allObjects;
+     for (CBCentralManager *central in centrals) {
++        if (!objc_getAssociatedObject(central, kCBSInitialStateReportedKey)) {
++            // Its initial report, still queued, carries the new state.
++            continue;
++        }
+         id delegate = central.delegate;
+         if (delegate && [delegate respondsToSelector:@selector(centralManagerDidUpdateState:)]) {
+             dispatch_queue_t q = objc_getAssociatedObject(central, kCBSDelegateQueueKey);
+@@ -216,6 +221,27 @@ static void cbs_register_central(CBCentralManager *central) {
+     return matches;
+ }
+ 
++// iOS remembers the peripherals it has seen across launches, and
++// retrievePeripheralsWithIdentifiers: returns them to a relaunched app.
++static NSString *const kCBSKnownPeripheralsKey = @"ImpossiBLE.knownPeripherals";
++
++static void cbs_remember_peripheral(NSUUID *uuid, NSString *name) {
++    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
++    NSDictionary *known = [defaults dictionaryForKey:kCBSKnownPeripheralsKey] ?: @{};
++    NSString *value = name ?: @"";
++    if ([known[uuid.UUIDString] isEqual:value] || (value.length == 0 && known[uuid.UUIDString])) {
++        return;
++    }
++    NSMutableDictionary *updated = [known mutableCopy];
++    updated[uuid.UUIDString] = value;
++    [defaults setObject:updated forKey:kCBSKnownPeripheralsKey];
++}
++
++static NSString *cbs_known_peripheral_name(NSUUID *uuid) {
++    id name = [[NSUserDefaults standardUserDefaults] dictionaryForKey:kCBSKnownPeripheralsKey][uuid.UUIDString];
++    return [name isKindOfClass:[NSString class]] ? name : nil;
++}
++
+ static CBSPeripheral *cbs_any_peripheral_for_uuid(NSUUID *uuid) {
+     NSArray<CBSPeripheral *> *matches = cbs_all_peripherals_for_uuid(uuid);
+     return matches.count > 0 ? matches.firstObject : nil;
+@@ -435,20 +461,40 @@ static void cbs_l2cap_setup_read(NSString *chanId, int fd) {
+     gL2CAPFds[chanId] = @(fd);
+ }
+ 
++// CoreBluetooth treats a 16- or 32-bit UUID and its 128-bit form on the
++// Bluetooth base UUID as equal; comparing strings must too.
++static NSString *cbs_canonical_uuid_string(id item) {
++    CBUUID *uuid = nil;
++    if ([item isKindOfClass:[CBUUID class]]) {
++        uuid = item;
++    } else if ([item isKindOfClass:[NSString class]] && [item length] > 0) {
++        @try {
++            uuid = [CBUUID UUIDWithString:item];
++        } @catch (NSException *e) {
++            return [(NSString *)item uppercaseString];
++        }
++    }
++    NSData *data = uuid.data;
++    if (data.length == 2 || data.length == 4) {
++        const uint8_t *b = data.bytes;
++        uint32_t value = 0;
++        for (NSUInteger i = 0; i < data.length; i++) {
++            value = value << 8 | b[i];
++        }
++        return [NSString stringWithFormat:@"%08X-0000-1000-8000-00805F9B34FB", value];
++    }
++    return uuid.UUIDString.uppercaseString;
++}
++
+ static NSSet<NSString *> *cbs_normalized_uuid_string_set(NSArray *uuids) {
+     NSMutableSet<NSString *> *out = [NSMutableSet set];
+     if (![uuids isKindOfClass:[NSArray class]]) {
+         return out;
+     }
+     for (id item in uuids) {
+-        NSString *uuidString = nil;
+-        if ([item isKindOfClass:[CBUUID class]]) {
+-            uuidString = ((CBUUID *)item).UUIDString;
+-        } else if ([item isKindOfClass:[NSString class]]) {
+-            uuidString = (NSString *)item;
+-        }
++        NSString *uuidString = cbs_canonical_uuid_string(item);
+         if (uuidString.length > 0) {
+-            [out addObject:uuidString.uppercaseString];
++            [out addObject:uuidString];
+         }
+     }
+     return out;
+@@ -498,7 +544,7 @@ static BOOL cbs_central_should_receive_discovery(CBCentralManager *central, CBSP
+     NSArray *services = peripheral.services;
+     for (id service in services) {
+         CBUUID *uuid = [service respondsToSelector:@selector(UUID)] ? [service UUID] : nil;
+-        NSString *uuidString = [uuid.UUIDString uppercaseString];
++        NSString *uuidString = cbs_canonical_uuid_string(uuid);
+         if (uuidString.length > 0 && [wanted containsObject:uuidString]) {
+             return YES;
+         }
+@@ -602,7 +648,7 @@ static BOOL cbs_peripheral_matches_service_filter(CBSPeripheral *peripheral, NSS
+     NSArray *services = [peripheral services];
+     for (id service in services) {
+         CBUUID *uuid = [service respondsToSelector:@selector(UUID)] ? [service UUID] : nil;
+-        NSString *uuidString = [uuid.UUIDString uppercaseString];
++        NSString *uuidString = cbs_canonical_uuid_string(uuid);
+         if (uuidString.length > 0 && [wantedServices containsObject:uuidString]) {
+             return YES;
+         }
+@@ -786,6 +832,7 @@ static void cbs_handle_message(NSDictionary *msg) {
+         if (!uuid) {
+             return;
+         }
++        cbs_remember_peripheral(uuid, name);
+         if (!gAdvertisedServices) {
+             gAdvertisedServices = [NSMutableDictionary dictionary];
+         }
+@@ -941,20 +988,21 @@ static void cbs_handle_message(NSDictionary *msg) {
+                 [delegate centralManager:central didConnectPeripheral:cbPeripheral];
+             } else if ([type isEqualToString:@"didFailConnect"] &&
+                        [delegate respondsToSelector:@selector(centralManager:didFailToConnectPeripheral:error:)]) {
+-                [delegate centralManager:central didFailToConnectPeripheral:cbPeripheral error:err];
++                // Forgotten before the app hears, so a connect it makes in the callback keeps its owner.
+                 [gPeripheralOwners removeObjectForKey:uuid];
++                [delegate centralManager:central didFailToConnectPeripheral:cbPeripheral error:err];
+             } else if ([type isEqualToString:@"didDisconnect"] &&
+                        [delegate respondsToSelector:@selector(centralManager:didDisconnectPeripheral:timestamp:isReconnecting:error:)]) {
++                [gPeripheralOwners removeObjectForKey:uuid];
+                 [delegate centralManager:central
+                    didDisconnectPeripheral:cbPeripheral
+                                 timestamp:timestamp
+                            isReconnecting:isReconnecting
+                                     error:err];
+-                [gPeripheralOwners removeObjectForKey:uuid];
+             } else if ([type isEqualToString:@"didDisconnect"] &&
+                        [delegate respondsToSelector:@selector(centralManager:didDisconnectPeripheral:error:)]) {
+-                [delegate centralManager:central didDisconnectPeripheral:cbPeripheral error:err];
+                 [gPeripheralOwners removeObjectForKey:uuid];
++                [delegate centralManager:central didDisconnectPeripheral:cbPeripheral error:err];
+             }
+         });
+         return;
+@@ -1628,7 +1676,12 @@ static void cbs_ensure_connection_open(void) {
+ }
+ 
+ static void cbs_post_init(id obj, id delegate, dispatch_queue_t queue) {
+-    cbs_ensure_connection_open();
++    // The shorter initializers call the longer one, and both are swizzled.
++    if (objc_getAssociatedObject(obj, kCBSDelegateQueueKey)) {
++        return;
++    }
++    // Record the central before the socket opens: the provider may answer
++    // hello at once, and the connection coming up notifies registered centrals.
+     dispatch_queue_t q = queue ?: dispatch_get_main_queue();
+     objc_setAssociatedObject(obj, kCBSDelegateQueueKey, q, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+     objc_setAssociatedObject(obj, kCBSIsScanningKey, @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+@@ -1636,11 +1689,23 @@ static void cbs_post_init(id obj, id delegate, dispatch_queue_t queue) {
+     objc_setAssociatedObject(obj, kCBSScanWireOptionsKey, @{}, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+     gCentral = obj;
+     cbs_register_central((CBCentralManager *)obj);
+-    if (delegate && [delegate respondsToSelector:@selector(centralManagerDidUpdateState:)]) {
+-        dispatch_async(q, ^{
+-            [delegate centralManagerDidUpdateState:obj];
+-        });
+-    }
++    cbs_ensure_connection_open();
++
++    // Like CoreBluetooth, report the initial state once, when it is known:
++    // after the open in flight has connected or failed.
++    __weak CBCentralManager *weakCentral = obj;
++    CBSConnectionAfterPendingOpen(^{
++        CBCentralManager *central = weakCentral;
++        if (!central) {
++            return;
++        }
++        objc_setAssociatedObject(central, kCBSInitialStateReportedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
++        if (delegate && [delegate respondsToSelector:@selector(centralManagerDidUpdateState:)]) {
++            dispatch_async(q, ^{
++                [delegate centralManagerDidUpdateState:central];
++            });
++        }
++    });
+ }
+ 
+ static id (*orig_init)(id, SEL, id, dispatch_queue_t, NSDictionary *);
+@@ -1691,7 +1756,9 @@ static void cbs_setDelegate(id self, SEL _cmd, id delegate) {
+     cbs_register_central((CBCentralManager *)self);
+     dispatch_queue_t q = objc_getAssociatedObject(self, kCBSDelegateQueueKey);
+     if (!q) {
+-        q = dispatch_get_main_queue();
++        // Called from inside -initWithDelegate:queue:options:, before the
++        // central's queue is known; cbs_post_init reports the state on it.
++        return;
+     }
+     if (delegate && [delegate respondsToSelector:@selector(centralManagerDidUpdateState:)]) {
+         dispatch_async(q, ^{
+@@ -1733,6 +1800,11 @@ static void cbs_connect_peripheral(id self, SEL _cmd, id peripheral, NSDictionar
+             gPeripheralOwners = [NSMutableDictionary dictionary];
+         }
+         gPeripheralOwners[uuid] = cbs_central_key(central);
++        // As in CoreBluetooth, a connect not yet made reads as connecting until it goes through or
++        // is cancelled, so an app that cancels pending connects by their state finds this one.
++        if ([peripheral isKindOfClass:[CBSPeripheral class]] && [(CBSPeripheral *)peripheral state] == CBPeripheralStateDisconnected) {
++            [(CBSPeripheral *)peripheral cbs_setState:CBPeripheralStateConnecting];
++        }
+         CBSConnectionSend(@{@"type": @"connect", @"id": uuid.UUIDString, @"options": options ?: @{}});
+     }
+ }
+@@ -1752,6 +1824,10 @@ static void cbs_cancel(id self, SEL _cmd, id peripheral) {
+             gPeripheralOwners[uuid] = cbs_central_key(central);
+         }
+         CBSConnectionSend(@{@"type": @"cancel", @"id": uuid.UUIDString});
++        // A cancelled connect that never went through is over at once.
++        if ([peripheral isKindOfClass:[CBSPeripheral class]] && [(CBSPeripheral *)peripheral state] == CBPeripheralStateConnecting) {
++            [(CBSPeripheral *)peripheral cbs_setState:CBPeripheralStateDisconnected];
++        }
+     }
+ }
+ 
+@@ -1838,11 +1914,15 @@ static void cbs_register_for_connection_events(id self, SEL _cmd, NSDictionary *
+             CBSPeripheral *peripheral = store[uuid];
+             if (!peripheral) {
+                 CBSPeripheral *source = cbs_any_peripheral_for_uuid(uuid);
++                NSString *knownName = cbs_known_peripheral_name(uuid);
+                 if (source) {
+                     peripheral = [[CBSPeripheral alloc] initWithIdentifier:uuid name:source.name ?: @""];
+                     [peripheral cbs_setState:source.state];
+                     peripheral.services = source.services ?: @[];
+                     store[uuid] = peripheral;
++                } else if (knownName) {
++                    peripheral = [[CBSPeripheral alloc] initWithIdentifier:uuid name:knownName];
++                    store[uuid] = peripheral;
+                 }
+             }
+             if (peripheral) {
+diff --git a/Sources/ImpossiBLE/CBSConnection.h b/Sources/ImpossiBLE/CBSConnection.h
+index fb7b288..dc4935c 100644
+--- a/Sources/ImpossiBLE/CBSConnection.h
++++ b/Sources/ImpossiBLE/CBSConnection.h
+@@ -7,4 +7,7 @@ void CBSConnectionSetMessageHandler(CBSMessageHandler handler);
+ void CBSConnectionSetStateHandler(CBSStateHandler handler);
+ void CBSConnectionSend(NSDictionary *msg);
+ void CBSConnectionOpen(void);
++/// Runs the block on the connection's queue, after any open already requested has
++/// connected or failed. Connection state changes are reported on the same queue.
++void CBSConnectionAfterPendingOpen(dispatch_block_t block);
+ BOOL CBSConnectionIsConnected(void);
+diff --git a/Sources/ImpossiBLE/CBSConnection.m b/Sources/ImpossiBLE/CBSConnection.m
+index d3fa0fa..914de87 100644
+--- a/Sources/ImpossiBLE/CBSConnection.m
++++ b/Sources/ImpossiBLE/CBSConnection.m
+@@ -252,6 +252,13 @@ void CBSConnectionOpen(void) {
+     });
+ }
+ 
++void CBSConnectionAfterPendingOpen(dispatch_block_t block) {
++    if (!gWriteQueue) {
++        gWriteQueue = dispatch_queue_create("impossible.writer", DISPATCH_QUEUE_SERIAL);
++    }
++    dispatch_async(gWriteQueue, block);
++}
++
+ void CBSConnectionSend(NSDictionary *msg) {
+     if (!gWriteQueue) {
+         gWriteQueue = dispatch_queue_create("impossible.writer", DISPATCH_QUEUE_SERIAL);
+diff --git a/Sources/ImpossiBLE/CBSProxies.m b/Sources/ImpossiBLE/CBSProxies.m
+index 6bc0576..5d0f0fb 100644
+--- a/Sources/ImpossiBLE/CBSProxies.m
++++ b/Sources/ImpossiBLE/CBSProxies.m
+@@ -22,6 +22,11 @@ static id cbs_super_init(id self, Class superclass) {
+ 
+ #pragma mark - CBSPeripheral
+ 
++// Every stand-in peripheral, kept for the life of the process. A CBPeripheral's own dealloc
++// expects CoreBluetooth's bookkeeping (it removes an observer CoreBluetooth registered), which a
++// stand-in never had: released, it threw and the app aborted. Peripherals are few and small.
++static NSMutableSet *gPinnedPeripherals;
++
+ @implementation CBSPeripheral {
+     NSUUID *_shimIdentifier;
+     NSString *_shimName;
+@@ -37,7 +42,10 @@ - (instancetype)initWithIdentifier:(NSUUID *)identifier name:(NSString *)name {
+         _shimName = [name copy];
+         _shimDelegate = nil;
+         _shimState = CBPeripheralStateDisconnected;
+-        _shimServices = @[];
++        _shimServices = nil;
++        static dispatch_once_t once;
++        dispatch_once(&once, ^{ gPinnedPeripherals = [NSMutableSet set]; });
++        @synchronized (gPinnedPeripherals) { [gPinnedPeripherals addObject:self]; }
+     }
+     return self;
+ }
+@@ -48,7 +56,7 @@ - (NSString *)name { return _shimName; }
+ - (void)setDelegate:(id<CBPeripheralDelegate>)delegate { _shimDelegate = delegate; }
+ - (CBPeripheralState)state { return _shimState; }
+ - (NSArray *)services { return _shimServices; }
+-- (void)setServices:(NSArray *)services { _shimServices = [services copy] ?: @[]; }
++- (void)setServices:(NSArray *)services { _shimServices = [services copy]; }
+ 
+ - (void)cbs_updateName:(NSString *)name {
+     _shimName = [name copy];
+@@ -56,6 +64,22 @@ - (void)cbs_updateName:(NSString *)name {
+ 
+ - (void)cbs_setState:(CBPeripheralState)state {
+     _shimState = state;
++    // As in CoreBluetooth, a disconnect ends every subscription and forgets
++    // the services: services is nil until the app discovers them again on its
++    // next connection.
++    if (state == CBPeripheralStateDisconnected) {
++        for (id service in _shimServices) {
++            if (![service isKindOfClass:[CBSService class]]) {
++                continue;
++            }
++            for (id characteristic in [(CBSService *)service characteristics]) {
++                if ([characteristic isKindOfClass:[CBSCharacteristic class]]) {
++                    [(CBSCharacteristic *)characteristic cbs_setNotifying:NO];
++                }
++            }
++        }
++        _shimServices = nil;
++    }
+ }
+ 
+ - (void)readRSSI {
+diff --git a/Tests/ImpossiBLETests/CentralLifecycleTests.swift b/Tests/ImpossiBLETests/CentralLifecycleTests.swift
+index 7dad45a..a6fe9a9 100644
+--- a/Tests/ImpossiBLETests/CentralLifecycleTests.swift
++++ b/Tests/ImpossiBLETests/CentralLifecycleTests.swift
+@@ -44,9 +44,83 @@ final class CentralLifecycleTests: XCTestCase {
+         _ = survivorDelegate
+         _ = ephemeralDelegate
+     }
++
++    func testStateUpdatesArriveOnTheCentralsQueue() {
++        let key = DispatchSpecificKey<Bool>()
++        let queue = DispatchQueue(label: "impossible.tests.central.queue")
++        queue.setSpecific(key: key, value: true)
++        let delegate = QueueRecordingDelegate(key: key)
++
++        let central = CBCentralManager(delegate: delegate, queue: queue, options: nil)
++        queue.sync {}
++        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
++        queue.sync {}
++
++        XCTAssertFalse(delegate.onQueue.isEmpty)
++        XCTAssertEqual(delegate.onQueue.filter { !$0 }.count, 0, "a state update arrived off the central's queue")
++        _ = central
++    }
++
++    func testEveryInitializerReportsTheInitialStateTheSameNumberOfTimes() {
++        let withOptions = CountingDelegate()
++        let withOptionsQueue = DispatchQueue(label: "impossible.tests.central.options")
++        let a = CBCentralManager(delegate: withOptions, queue: withOptionsQueue, options: nil)
++
++        let withoutOptions = CountingDelegate()
++        let withoutOptionsQueue = DispatchQueue(label: "impossible.tests.central.nooptions")
++        let b = CBCentralManager(delegate: withoutOptions, queue: withoutOptionsQueue)
++
++        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
++        withOptionsQueue.sync {}
++        withoutOptionsQueue.sync {}
++
++        XCTAssertGreaterThan(withOptions.count, 0)
++        XCTAssertEqual(withoutOptions.count, withOptions.count)
++        _ = (a, b)
++    }
+ }
+ 
+ private final class CentralDelegate: NSObject, CBCentralManagerDelegate {
+     func centralManagerDidUpdateState(_ central: CBCentralManager) {}
+ }
++
++private final class QueueRecordingDelegate: NSObject, CBCentralManagerDelegate {
++    let key: DispatchSpecificKey<Bool>
++    private let lock = NSLock()
++    private var calls: [Bool] = []
++
++    init(key: DispatchSpecificKey<Bool>) {
++        self.key = key
++    }
++
++    var onQueue: [Bool] {
++        lock.lock()
++        defer { lock.unlock() }
++        return calls
++    }
++
++    func centralManagerDidUpdateState(_ central: CBCentralManager) {
++        let isOnQueue = DispatchQueue.getSpecific(key: key) == true
++        lock.lock()
++        calls.append(isOnQueue)
++        lock.unlock()
++    }
++}
++
++private final class CountingDelegate: NSObject, CBCentralManagerDelegate {
++    private let lock = NSLock()
++    private var updates = 0
++
++    var count: Int {
++        lock.lock()
++        defer { lock.unlock() }
++        return updates
++    }
++
++    func centralManagerDidUpdateState(_ central: CBCentralManager) {
++        lock.lock()
++        updates += 1
++        lock.unlock()
++    }
++}
+ #endif
+-- 
+2.50.1 (Apple Git-155)
+
