@@ -96,6 +96,7 @@ func main() {
 	code := flag.String("code", "", "pairing code for a new sensor (default: random)")
 	serial := flag.Uint64("serial", 0, "serial for a new sensor (default: random)")
 	age := flag.Duration("age", 2*time.Hour, "how long ago a new sensor was activated; 0 starts in warmup")
+	interval := flag.Duration("interval", 0, "time between readings (default: the sensor's 300 s; shorter for faster testing, the same for a sensor's whole life)")
 	model := flag.String("model", "g7", "model of a new sensor: g7 (DXCM), oneplus (DX02) or stelo (DX01)")
 	days := flag.Int("days", 0, "10- or 15-day preset for a new sensor (default: 15 for stelo, else 10)")
 	lifetime := flag.Duration("lifetime", 0, "rated lifetime of a new sensor, before the 12 h grace period (default: from -days)")
@@ -146,7 +147,12 @@ func main() {
 
 	log.Printf("g7sim — for development use only, not a Dexcom product; simulated data only")
 
-	sensor := g7.NewSensor(state, *statePath, g7.MeasuredTiming())
+	timing := g7.MeasuredTiming()
+	if *interval > 0 {
+		timing.ReadingInterval = *interval
+		log.Printf("readings every %v", *interval)
+	}
+	sensor := g7.NewSensor(state, *statePath, timing)
 	log.Printf("%s (%s, %d-day preset, lifetime %v, warmup %v) serial %d pairing code %s, activated %s",
 		sensor.Name(), sensor.Model(), state.Days, state.Lifetime(), state.Warmup,
 		sensor.Serial(), sensor.PairingCode(), state.Activation.Format(time.RFC3339))
