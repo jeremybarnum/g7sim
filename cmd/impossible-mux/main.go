@@ -17,6 +17,7 @@
 // With -api, apps and providers can be put out of range and back:
 //
 //	curl -X POST 'localhost:8087/range?app=<bundle id>&in=0'   (the app away)
+//	curl -X POST 'localhost:8087/power?app=<bundle id>&on=0'   (Bluetooth off in the app)
 //	curl -X POST 'localhost:8087/range?provider=pod&in=0'      (the pod away)
 //
 // A link out of range drops, a connect out of range waits, and the last
@@ -44,7 +45,7 @@ func main() {
 	simulator := flag.String("simulator", "", "the app's simulator (name or UDID), for -suspend")
 	suspendApp := flag.Bool("suspend", false, "stop the app while iOS would have it suspended, waking it for Bluetooth events")
 	connectDelay := flag.Duration("connect-delay", 0, "hold each app's connect this long before the provider makes it, as a radio takes time to bring a link up")
-	api := flag.String("api", "", "address of the range API, e.g. :8087: GET /range; POST /range?app=<bundle id>&in=0|1 or ?provider=<part of a socket path>&in=0|1")
+	api := flag.String("api", "", "address of the range API, e.g. :8087: GET /range; POST /range?app=<bundle id>&in=0|1 or ?provider=<part of a socket path>&in=0|1; POST /power?app=<bundle id>&on=0|1")
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "usage: %s [-socket path] [-suspend -simulator name] provider.sock...\n", os.Args[0])
 		flag.PrintDefaults()
@@ -96,6 +97,15 @@ func serveAPI(addr string, m *mux) {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(m.rangeState())
+	})
+	http.HandleFunc("/power", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if err := m.setPower(q.Get("app"), q.Get("on") != "0"); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(m.rangeState())

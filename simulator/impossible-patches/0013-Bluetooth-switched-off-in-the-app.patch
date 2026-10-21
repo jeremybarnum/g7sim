@@ -1,0 +1,61 @@
+From 0f89816d35c8285953e986e0730cb8232112a0fb Mon Sep 17 00:00:00 2001
+From: Jeremy Barnum <prefer not to supply>
+Date: Wed, 21 Oct 2026 02:45:54 -0400
+Subject: [PATCH] Bluetooth switched off in the app
+
+A provider can switch Bluetooth off and on in the app, as the user does
+in Control Center: a powerState message sets every central's state to
+powered off, or back, and each central hears the change. An app that
+checks for Bluetooth being off (the production line's phone refuses a
+hand-back it cannot take up) can be tested with it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Sources/ImpossiBLE/CBSActivator.m | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/Sources/ImpossiBLE/CBSActivator.m b/Sources/ImpossiBLE/CBSActivator.m
+index 9fd9ce0..265e500 100644
+--- a/Sources/ImpossiBLE/CBSActivator.m
++++ b/Sources/ImpossiBLE/CBSActivator.m
+@@ -24,6 +24,8 @@
+ static uint64_t gNextCentralId = 1;
+ 
+ static __weak CBCentralManager *gCentral;
++// Bluetooth switched off in the app (a provider's powerState): every central reads powered off.
++static BOOL gPoweredOff;
+ static NSHashTable<CBCentralManager *> *gCentrals;
+ // The centrals that registered for connection events: iOS tells each of them when any app's link
+ // to a matching peripheral comes up or goes down.
+@@ -839,6 +841,18 @@ static void cbs_handle_message(NSDictionary *msg) {
+         return;
+     }
+ 
++    // Bluetooth switched off or on in the app, as in Control Center: every central hears the
++    // state change. The provider drops the app's links itself.
++    if ([type isEqualToString:@"powerState"]) {
++        BOOL off = ![msg[@"on"] boolValue];
++        if (off != gPoweredOff) {
++            gPoweredOff = off;
++            NSLog(@"ImpossiBLE: Bluetooth %@", off ? @"off" : @"on");
++            cbs_notify_all_centrals_state_changed();
++        }
++        return;
++    }
++
+     if ([type isEqualToString:@"didDiscover"]) {
+         NSString *uuidStr = msg[@"id"];
+         NSString *name = [msg[@"name"] isKindOfClass:[NSString class]] ? msg[@"name"] : @"";
+@@ -1770,6 +1784,9 @@ static id cbs_init_plain(id self, SEL _cmd) {
+ 
+ static CBManagerState (*orig_state)(id, SEL);
+ static CBManagerState cbs_state(id self, SEL _cmd) {
++    if (gPoweredOff) {
++        return CBManagerStatePoweredOff;
++    }
+     return CBSConnectionIsConnected() ? CBManagerStatePoweredOn : CBManagerStatePoweredOff;
+ }
+ 
+-- 
+2.50.1 (Apple Git-155)
+

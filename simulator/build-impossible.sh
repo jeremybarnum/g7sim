@@ -30,7 +30,8 @@ git -C "$src" checkout --quiet --force "$commit"
 # stand-in peripheral aborting the app in CBPeripheral's dealloc (0009), and
 # a connection event reaching one central only, without the peripheral's
 # name (0010), a released central's connects left pending (0011), and the
-# reader's autorelease pool never drained, keeping released centrals (0012).
+# reader's autorelease pool never drained, keeping released centrals (0012);
+# and Bluetooth switched off in the app by the provider (0013).
 for patch in "$here"/impossible-patches/*.patch; do
 	git -C "$src" apply "$patch"
 done

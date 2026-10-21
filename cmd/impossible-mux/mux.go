@@ -926,6 +926,31 @@ func (m *mux) fromProvider(i int, raw []byte, msg map[string]interface{}) {
 	}
 }
 
+// setPower switches Bluetooth off or on in an app, as the user does in Control Center: its
+// CoreBluetooth reads powered off (ImpossiBLE's powerState) and it is out of range of everything
+// while off.
+func (m *mux) setPower(bundle string, on bool) error {
+	if bundle == "" {
+		return fmt.Errorf("power needs app=<bundle id>")
+	}
+	if err := m.setRange(bundle, "", on); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	var to []*app
+	for a := range m.apps {
+		if a.bundle == bundle && !a.closed {
+			to = append(to, a)
+		}
+	}
+	m.mu.Unlock()
+	for _, a := range to {
+		m.toApp(a, map[string]interface{}{"type": "powerState", "on": on})
+	}
+	log.Printf("power: app %q Bluetooth %v", bundle, map[bool]string{true: "on", false: "off"}[on])
+	return nil
+}
+
 func (m *mux) appsList() []*app {
 	var out []*app
 	for a := range m.apps {
