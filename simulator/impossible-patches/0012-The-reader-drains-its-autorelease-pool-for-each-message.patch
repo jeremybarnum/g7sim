@@ -1,0 +1,38 @@
+From d33662cd15a67af12d3d8f4e6d281e47b292eb74 Mon Sep 17 00:00:00 2001
+From: Jeremy Barnum <prefer not to supply>
+Date: Wed, 21 Oct 2026 02:10:46 -0400
+Subject: [PATCH] The reader drains its autorelease pool for each message
+
+The socket reader runs as one endless block on its queue, so its
+autorelease pool never drained: whatever handling a message autoreleased,
+a central manager among them, lived as long as the app. A central an app
+had replaced stayed alive with its pending connects (which a released
+central cancels), and was released only when the thread finally drained,
+much later. Each message is now handled in its own pool.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Sources/ImpossiBLE/CBSConnection.m | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/Sources/ImpossiBLE/CBSConnection.m b/Sources/ImpossiBLE/CBSConnection.m
+index 914de87..ba82a77 100644
+--- a/Sources/ImpossiBLE/CBSConnection.m
++++ b/Sources/ImpossiBLE/CBSConnection.m
+@@ -90,7 +90,12 @@ static void cbs_start_reader(int fd) {
+                 }
+                 NSData *line = [buffer subdataWithRange:NSMakeRange(0, (NSUInteger)idx)];
+                 [buffer replaceBytesInRange:NSMakeRange(0, (NSUInteger)idx + 1) withBytes:NULL length:0];
+-                cbs_handle_line(line);
++                // The reader is one endless block, so its pool would never drain: what a
++                // message's handling autoreleases (a central, a peripheral) would live as long as
++                // the app, where CoreBluetooth would release it at once.
++                @autoreleasepool {
++                    cbs_handle_line(line);
++                }
+             }
+         }
+         cbs_handle_disconnect(fd);
+-- 
+2.50.1 (Apple Git-155)
+
