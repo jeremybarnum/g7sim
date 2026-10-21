@@ -19,7 +19,21 @@ const (
 	handshakeTimeout = 65 * time.Second // outlasts the client's own 60 s pairing deadline
 	sessionIdle      = 6 * time.Second  // close once the client stops asking
 	certMTU          = 20               // the certificate characteristic streams in 20-byte chunks
+	dexcomAppWait    = 2 * time.Second  // a client that has written nothing by then only observes
 )
+
+// DexcomApp has a simulated Dexcom app share each link, as the Dexcom app on a phone or a
+// watch does: a client that does not authenticate itself (stock G7SensorKit, which only
+// observes the app's session) sees the sensor authenticated and bonded, then the reading and
+// the recent backfill the app's session brings. A client that authenticates itself is served
+// as before.
+var DexcomApp bool
+
+// AppDisplay is implemented by a link that knows which device's Dexcom app it rides:
+// DisplayPhone or DisplayWatch. Without it, the phone's.
+type AppDisplay interface {
+	AppDisplay() byte
+}
 
 type inMsg struct {
 	char       Char
@@ -45,16 +59,18 @@ type handler struct {
 	sessionKey  []byte // set once a J-PAKE exchange produces a key on this link
 	displayType byte
 	served      bool
+	subscribed  map[Char]bool // the characteristics the client listens to
 }
 
 func newHandler(sensor *Sensor, link Link, mode AdvertMode) Handler {
 	h := &handler{
-		sensor:   sensor,
-		link:     link,
-		mode:     mode,
-		in:       make(chan inMsg, 512),
-		done:     make(chan struct{}),
-		finished: make(chan struct{}),
+		sensor:     sensor,
+		link:       link,
+		mode:       mode,
+		in:         make(chan inMsg, 512),
+		subscribed: map[Char]bool{},
+		done:       make(chan struct{}),
+		finished:   make(chan struct{}),
 	}
 	go func() {
 		defer h.link.Close()
@@ -81,7 +97,15 @@ func (h *handler) Subscribed(c Char) {
 func (h *handler) Closed() { close(h.done) }
 
 func (h *handler) protocol() {
-	first, ok := h.waitAuth(handshakeTimeout)
+	wait := handshakeTimeout
+	if DexcomApp {
+		wait = dexcomAppWait
+	}
+	first, ok := h.waitAuth(wait)
+	if !ok && DexcomApp && !h.gone() {
+		h.observed()
+		return
+	}
 	if !ok || len(first) == 0 {
 		return
 	}
@@ -397,6 +421,86 @@ func (h *handler) handleControl(msg []byte) {
 	}
 }
 
+// MARK: - The Dexcom app's session, for a client that only observes
+
+// observed plays the Dexcom app's session on the link: its authentication shows as
+// authenticated and bonded, then its reading and the last hour's backfill arrive, and the app
+// hangs up.
+func (h *handler) observed() {
+	now := time.Now()
+	h.displayType = DisplayPhone
+	if a, ok := h.link.(AppDisplay); ok {
+		h.displayType = a.AppDisplay()
+	}
+	if !h.sensor.AdmitDisplay(h.link.Addr(), h.displayType, now, h.mode) {
+		return
+	}
+	if !h.waitSubscribed(CharAuth, handshakeTimeout) {
+		return
+	}
+	h.link.Notify(CharAuth, []byte{opAuthStatus, 0x01, 0x01})
+	if !h.waitSubscribed(CharControl, 10*time.Second) {
+		return
+	}
+	r, sensorNow := h.sensor.Latest()
+	if r == nil {
+		return
+	}
+	h.link.Notify(CharControl, GlucoseMessage(r, sensorNow))
+	h.sensor.Served(h.link.Addr(), h.displayType, now)
+	h.served = true
+	log.Printf("%s: served reading at %d as the Dexcom app's session (display type %d)", h.link.Addr(), r.Time, h.displayType)
+	// The client listens to backfill once it has the reading.
+	if h.waitSubscribed(CharBackfill, 5*time.Second) {
+		start := uint32(0)
+		if sensorNow > 3600 {
+			start = sensorNow - 3600
+		}
+		records := h.sensor.Backfill(start, sensorNow)
+		for i := 0; i < len(records); i += 2 {
+			frame := BackfillRecord(records[i])
+			if i+1 < len(records) {
+				frame = append(frame, BackfillRecord(records[i+1])...)
+			}
+			h.link.Notify(CharBackfill, frame)
+		}
+		h.link.Notify(CharControl, []byte{opBackfill, 0x00})
+	}
+	// The app's link stays up a few seconds after its session, then it hangs up.
+	h.readNext(3 * time.Second)
+}
+
+// waitSubscribed waits for the client to listen to a characteristic. Writes that arrive
+// meanwhile are kept for the steps that want them.
+func (h *handler) waitSubscribed(c Char, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for !h.subscribed[c] {
+		m, ok := h.readNext(time.Until(deadline))
+		if !ok {
+			return false
+		}
+		switch {
+		case m.subscribed:
+		case m.char == CharAuth:
+			h.authQ = append(h.authQ, m.data)
+		case m.char == CharControl:
+			h.ctrlQ = append(h.ctrlQ, m.data)
+		case m.char == CharCertificate:
+			h.certBuf = append(h.certBuf, m.data...)
+		}
+	}
+	return true
+}
+
+func (h *handler) gone() bool {
+	select {
+	case <-h.done:
+		return true
+	default:
+		return false
+	}
+}
+
 // MARK: - Reading the central's writes
 
 func (h *handler) readNext(timeout time.Duration) (inMsg, bool) {
@@ -407,6 +511,9 @@ func (h *handler) readNext(timeout time.Duration) (inMsg, bool) {
 	defer t.Stop()
 	select {
 	case m := <-h.in:
+		if m.subscribed {
+			h.subscribed[m.char] = true
+		}
 		return m, true
 	case <-t.C:
 		return inMsg{}, false

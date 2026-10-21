@@ -96,6 +96,7 @@ func main() {
 	code := flag.String("code", "", "pairing code for a new sensor (default: random)")
 	serial := flag.Uint64("serial", 0, "serial for a new sensor (default: random)")
 	age := flag.Duration("age", 2*time.Hour, "how long ago a new sensor was activated; 0 starts in warmup")
+	dexcomApp := flag.Bool("dexcom-app", false, "a simulated Dexcom app shares each link: a client that does not authenticate itself (stock G7SensorKit) gets readings, and apps listening for connection events hear the app connect at each reading")
 	interval := flag.Duration("interval", 0, "time between readings (default: the sensor's 300 s; shorter for faster testing, the same for a sensor's whole life)")
 	model := flag.String("model", "g7", "model of a new sensor: g7 (DXCM), oneplus (DX02) or stelo (DX01)")
 	days := flag.Int("days", 0, "10- or 15-day preset for a new sensor (default: 15 for stelo, else 10)")
@@ -110,6 +111,7 @@ func main() {
 	suspendApp := flag.Bool("suspend", false, "stop the app while iOS would have it suspended, waking it for Bluetooth events")
 	dylib := flag.String("dylib", "", "ImpossiBLE library injected into a relaunched app (default: simulator/build/libImpossiBLE.dylib beside g7sim)")
 	flag.Parse()
+	g7.DexcomApp = *dexcomApp
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	rand.Seed(time.Now().UnixNano())
 

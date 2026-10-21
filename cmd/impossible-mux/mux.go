@@ -113,6 +113,8 @@ type app struct {
 	bundle string
 	scan   []byte          // its scan, while it scans
 	filter map[string]bool // its service filter, canonical; empty: every advertisement
+
+	connEvents bool // it listens for connection events: another app's link coming up
 }
 
 func newMux(providers []string, s suspender) *mux {
@@ -642,6 +644,9 @@ func (m *mux) fromApp(a *app, raw []byte, msg map[string]interface{}) {
 		m.mu.Unlock()
 		m.rescan()
 		return
+	case t == "registerForConnectionEvents":
+		a.connEvents = true
+		to = all
 	case t == "setMockConfiguration" || t == "clearMockConfiguration":
 		m.asked = a
 		to = all
@@ -784,6 +789,17 @@ func (m *mux) fromProvider(i int, raw []byte, msg map[string]interface{}) {
 		}
 		if m.lastHello != nil {
 			to = []*app{m.lastHello}
+		}
+	case t == "connectionEvent":
+		// Another app's link (the Dexcom app's, simulated) came up: iOS tells every app
+		// listening for connection events, in range of the peripheral, whoever holds it.
+		if _, ok := m.owner[id]; !ok && id != "" {
+			m.owner[id] = i
+		}
+		for a := range m.apps {
+			if a.connEvents && !a.closed && !m.blocked(a, id) {
+				to = append(to, a)
+			}
 		}
 	case t == "didDiscover":
 		if _, ok := m.owner[id]; !ok && id != "" {

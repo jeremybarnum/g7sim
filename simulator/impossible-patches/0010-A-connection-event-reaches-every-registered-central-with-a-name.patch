@@ -1,0 +1,105 @@
+From d97e1f05ce0b5fb254557bd63e0f464253fdcefa Mon Sep 17 00:00:00 2001
+From: Jeremy Barnum <prefer not to supply>
+Date: Tue, 20 Oct 2026 22:57:46 -0400
+Subject: [PATCH] A connection event reaches every registered central, with a
+ name
+
+In CoreBluetooth, every central that registered for connection events
+hears when any app's link to a matching peripheral comes up. ImpossiBLE
+told only the peripheral's owner or the latest central, so in an app with
+two centrals (a pump's and a sensor's) the sensor's could miss it. And a
+central that never scanned met the peripheral nameless, so an app that
+recognises its sensor by name ignored it. A connection event now reaches
+each registered central, and carries the peripheral's name when the
+provider gives one.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Sources/ImpossiBLE/CBSActivator.m | 55 ++++++++++++++++++++++---------
+ 1 file changed, 39 insertions(+), 16 deletions(-)
+
+diff --git a/Sources/ImpossiBLE/CBSActivator.m b/Sources/ImpossiBLE/CBSActivator.m
+index 90f00b4..32abb07 100644
+--- a/Sources/ImpossiBLE/CBSActivator.m
++++ b/Sources/ImpossiBLE/CBSActivator.m
+@@ -25,6 +25,9 @@
+ 
+ static __weak CBCentralManager *gCentral;
+ static NSHashTable<CBCentralManager *> *gCentrals;
++// The centrals that registered for connection events: iOS tells each of them when any app's link
++// to a matching peripheral comes up or goes down.
++static NSHashTable<CBCentralManager *> *gConnectionEventCentrals;
+ static NSMapTable<NSString *, CBCentralManager *> *gCentralByKey;
+ static NSMutableDictionary<NSUUID *, NSString *> *gPeripheralOwners;
+ static NSDictionary *gActiveScanPayload;
+@@ -1015,24 +1018,40 @@ static void cbs_handle_message(NSDictionary *msg) {
+             return;
+         }
+         NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:uuidStr];
+-        CBCentralManager *central = cbs_owner_central_for_peripheral(uuid) ?: gCentral;
+-        id<CBCentralManagerDelegate> delegate = central.delegate;
+-        if (!central || !delegate) {
+-            return;
+-        }
+-        CBSPeripheral *peripheral = cbs_peripheral_for_central(central, uuid, nil, YES);
+-        if (!peripheral) {
+-            return;
+-        }
+-        if (![delegate respondsToSelector:@selector(centralManager:connectionEventDidOccur:forPeripheral:)]) {
+-            return;
++        // The peripheral's name, when the provider gives it: a central that never scanned for
++        // the peripheral otherwise meets it nameless.
++        NSString *name = [msg[@"name"] isKindOfClass:[NSString class]] ? msg[@"name"] : nil;
++        // Every central that registered for connection events hears it, as in iOS; with none
++        // registered, the peripheral's owner or the current central.
++        NSMutableArray<CBCentralManager *> *centrals = [NSMutableArray array];
++        for (CBCentralManager *registered in gConnectionEventCentrals) {
++            [centrals addObject:registered];
++        }
++        if (centrals.count == 0) {
++            CBCentralManager *central = cbs_owner_central_for_peripheral(uuid) ?: gCentral;
++            if (central) {
++                [centrals addObject:central];
++            }
+         }
+-        dispatch_queue_t queue = cbs_callback_queue_for_central(central);
+-        CBPeripheral *cbPeripheral = (CBPeripheral *)peripheral;
+         CBConnectionEvent event = (CBConnectionEvent)eventNum.integerValue;
+-        dispatch_async(queue, ^{
+-            [delegate centralManager:central connectionEventDidOccur:event forPeripheral:cbPeripheral];
+-        });
++        for (CBCentralManager *central in centrals) {
++            id<CBCentralManagerDelegate> delegate = central.delegate;
++            if (!delegate || ![delegate respondsToSelector:@selector(centralManager:connectionEventDidOccur:forPeripheral:)]) {
++                continue;
++            }
++            CBSPeripheral *peripheral = cbs_peripheral_for_central(central, uuid, name, YES);
++            if (!peripheral) {
++                continue;
++            }
++            if (name.length > 0 && peripheral.name.length == 0) {
++                [peripheral cbs_updateName:name];
++            }
++            dispatch_queue_t queue = cbs_callback_queue_for_central(central);
++            CBPeripheral *cbPeripheral = (CBPeripheral *)peripheral;
++            dispatch_async(queue, ^{
++                [delegate centralManager:central connectionEventDidOccur:event forPeripheral:cbPeripheral];
++            });
++        }
+         return;
+     }
+ 
+@@ -1856,6 +1875,10 @@ static void cbs_dealloc(__unsafe_unretained id self, SEL _cmd) {
+ static void (*orig_register_for_connection_events)(id, SEL, NSDictionary *);
+ static void cbs_register_for_connection_events(id self, SEL _cmd, NSDictionary *options) {
+     gCentral = self;
++    if (!gConnectionEventCentrals) {
++        gConnectionEventCentrals = [NSHashTable weakObjectsHashTable];
++    }
++    [gConnectionEventCentrals addObject:self];
+     NSDictionary *wireOptions = cbs_connection_event_wire_options(options);
+     CBSConnectionSend(@{
+         @"type": @"registerForConnectionEvents",
+-- 
+2.50.1 (Apple Git-155)
+

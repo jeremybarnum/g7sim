@@ -181,3 +181,69 @@ func TestReconnectWithForgottenSlot(t *testing.T) {
 		t.Fatal("sensor answered correctly for a key it does not have")
 	}
 }
+
+// A client that only observes, as stock G7SensorKit does, gets the Dexcom app's session: the
+// sensor authenticated and bonded, then the reading, then backfill and its end marker.
+func TestTheDexcomAppsSessionForAnObserver(t *testing.T) {
+	DexcomApp = true
+	defer func() { DexcomApp = false }()
+	s, _ := newTestSensor(t)
+	s.Tick(time.Now())
+
+	link := newFakeLink()
+	h := newHandler(s, link, AdvertFull)
+	h.Subscribed(CharAuth)
+	h.Subscribed(CharControl)
+
+	// The handler gives the client dexcomAppWait to authenticate itself first.
+	var auth capture
+	select {
+	case auth = <-link.out:
+	case <-time.After(dexcomAppWait + 2*time.Second):
+		t.Fatal("no authentication status")
+	}
+	if auth.char != CharAuth || !bytes.Equal(auth.data, []byte{opAuthStatus, 0x01, 0x01}) {
+		t.Fatalf("first notification %v %x, want authenticated and bonded", auth.char, auth.data)
+	}
+	glucose := link.recv(t)
+	if glucose.char != CharControl || glucose.data[0] != opGlucose {
+		t.Fatalf("second notification %v %x, want the reading", glucose.char, glucose.data)
+	}
+	h.Subscribed(CharBackfill)
+	for {
+		c := link.recv(t)
+		if c.char == CharControl {
+			if !bytes.Equal(c.data, []byte{opBackfill, 0x00}) {
+				t.Fatalf("control %x, want the backfill end marker", c.data)
+			}
+			break
+		}
+		if c.char != CharBackfill {
+			t.Fatalf("unexpected %v %x", c.char, c.data)
+		}
+	}
+	select {
+	case <-link.closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the Dexcom app's link did not hang up")
+	}
+}
+
+// A client that authenticates itself is not mistaken for an observer.
+func TestAnAuthenticatingClientIsServedAsBefore(t *testing.T) {
+	DexcomApp = true
+	defer func() { DexcomApp = false }()
+	s, _ := newTestSensor(t)
+	s.state.Slots[DisplayPhone] = &Slot{Key: make([]byte, 16), LastSeen: time.Now()}
+	s.Tick(time.Now())
+
+	link := newFakeLink()
+	h := newHandler(s, link, AdvertFull)
+	h.Subscribed(CharAuth)
+	msg := append([]byte{opAuthChallengeTx}, 1, 2, 3, 4, 5, 6, 7, 8)
+	h.Write(CharAuth, append(msg, DisplayPhone))
+	reply := link.recv(t)
+	if reply.char != CharAuth || reply.data[0] != opAuthChallengeRx {
+		t.Fatalf("reply %v %x, want the challenge answer", reply.char, reply.data)
+	}
+}

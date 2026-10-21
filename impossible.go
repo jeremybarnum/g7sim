@@ -40,10 +40,13 @@ type SimRadio struct {
 	scanning bool
 	pending  bool   // the app asked to connect; held until the sensor advertises
 	central  string // the address the pending connect comes from
-	link     *simLink
-	mode     g7.AdvertMode
-	tried    time.Time // last attempt to bring up a pending connection
-	startAt  time.Time // a pending connect's start delay ends
+	app      string // the app the pending connect comes from
+
+	connEvents bool // the app listens for connection events (another app's link coming up)
+	link       *simLink
+	mode       g7.AdvertMode
+	tried      time.Time // last attempt to bring up a pending connection
+	startAt    time.Time // a pending connect's start delay ends
 
 	missedWakes int // readings advertised with nothing lodged to wake the app
 	held        *heldRequests
@@ -376,9 +379,9 @@ func (r *SimRadio) handle(c *simClient, msg map[string]interface{}) {
 			r.pending = true
 			// A mux serving several apps names the one asking, so each app is
 			// its own central to the sensor, as a phone and a watch are.
-			r.central = c.addr
+			r.central, r.app = c.addr, c.bundle
 			if app := str(msg, "central"); app != "" {
-				r.central = centralAddr(app)
+				r.central, r.app = centralAddr(app), app
 			}
 			r.tried = time.Time{}
 			r.startAt = time.Now().Add(startDelay(msg))
@@ -433,6 +436,9 @@ func (r *SimRadio) handle(c *simClient, msg map[string]interface{}) {
 	case "readRSSI":
 		c.send(map[string]interface{}{"type": "didReadRSSI", "id": id, "rssi": -60, "error": ""})
 	case "registerForConnectionEvents":
+		r.mu.Lock()
+		r.connEvents = true
+		r.mu.Unlock()
 	case "setMockConfiguration":
 		c.send(map[string]interface{}{"type": "didSetMockConfiguration", "ok": false,
 			"error": "g7sim serves its own sensor and takes no mock configuration"})
@@ -556,7 +562,7 @@ func (r *SimRadio) setNotify(c *simClient, msg map[string]interface{}) {
 // refusal at the link layer does.
 func (r *SimRadio) tryConnect(now time.Time) {
 	r.mu.Lock()
-	c, mode, addr := r.client, r.mode, r.central
+	c, mode, addr, app := r.client, r.mode, r.central, r.app
 	if !r.pending || c == nil || r.link != nil || mode == g7.AdvertOff || now.Sub(r.tried) < time.Second || now.Before(r.startAt) {
 		r.mu.Unlock()
 		return
@@ -567,7 +573,7 @@ func (r *SimRadio) tryConnect(now time.Time) {
 	if !r.sensor.LinkOpened(addr, now, mode) {
 		return
 	}
-	l := &simLink{radio: r, client: c, addr: addr, events: make(chan event, 256), notifying: map[g7.Char]string{}}
+	l := &simLink{radio: r, client: c, addr: addr, app: app, events: make(chan event, 256), notifying: map[g7.Char]string{}}
 	r.mu.Lock()
 	if r.client != c || !r.pending {
 		r.mu.Unlock()
@@ -591,7 +597,7 @@ func (r *SimRadio) Run() {
 		r.mu.Lock()
 		changed := mode != r.mode
 		r.mode = mode
-		c, scanning := r.client, r.scanning
+		c, scanning, connEvents := r.client, r.scanning, r.connEvents
 		missed := 0
 		var relaunch *heldRequests
 		if changed {
@@ -616,6 +622,12 @@ func (r *SimRadio) Run() {
 			}
 			if mode == g7.AdvertFull && scanning && c != nil {
 				r.discovered(c)
+			}
+			if mode == g7.AdvertFull && g7.DexcomApp && connEvents && c != nil {
+				// The Dexcom app connects for the reading: an app listening for connection
+				// events hears the link come up, and may join it.
+				log.Printf("the Dexcom app connects for the reading: connection event to the listening apps")
+				c.send(map[string]interface{}{"type": "connectionEvent", "id": r.id, "event": 1, "name": r.sensor.Name()})
 			}
 		}
 		r.tryConnect(now)
@@ -656,6 +668,7 @@ type simLink struct {
 	radio   *SimRadio
 	client  *simClient
 	addr    string
+	app     string // the app at the other end, as the mux names it
 	events  chan event
 	handler g7.Handler
 
@@ -665,6 +678,14 @@ type simLink struct {
 }
 
 func (l *simLink) Addr() string { return l.addr }
+
+// AppDisplay is the Dexcom app the link rides: the watch's for a watch app, else the phone's.
+func (l *simLink) AppDisplay() byte {
+	if strings.Contains(strings.ToLower(l.app), "watch") {
+		return g7.DisplayWatch
+	}
+	return g7.DisplayPhone
+}
 
 func (l *simLink) Notify(c g7.Char, b []byte) error {
 	l.mu.Lock()

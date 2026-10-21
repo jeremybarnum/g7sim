@@ -310,6 +310,18 @@ noise, so the client's own verification fails and it re-pairs with the code. On 
 `session()` answers the control opcodes: `4e` glucose, `59` backfill, `52`/`4a` versions,
 `34`/`32` calibration. It hangs up after `sessionIdle` of quiet.
 
+### A client that only observes (`-dexcom-app`)
+
+Stock G7SensorKit never authenticates: on a phone or a watch it relies on the Dexcom app,
+whose link it shares, and only listens. With `-dexcom-app`, a simulated Dexcom app shares
+each link. A client that writes nothing on the authentication characteristic within two
+seconds sees `05 01 01` (authenticated and bonded) once it listens there, then the reading
+once it listens to control, then the last hour's backfill and its `59 00` end marker; the
+app then hangs up. A client that authenticates itself is served as above. In the Simulator
+transport, the app also connects at each reading: an app that registered for connection
+events (G7SensorKit's ride-only mode, which joins the Dexcom app's link instead of
+connecting itself) hears a connection event, with the sensor's name, and joins.
+
 ### What the sensor model provides
 
 | Need | Call |

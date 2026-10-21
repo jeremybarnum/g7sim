@@ -580,3 +580,58 @@ func TestPhoneBackAfterTheWatchHadThePod(t *testing.T) {
 	phone.send(map[string]interface{}{"type": "discoverServices", "id": "POD"})
 	pod.expect("discoverServices")
 }
+
+// A connection event (the simulated Dexcom app's link coming up) reaches every app listening for
+// connection events, whoever holds the peripheral, and no other app.
+func TestAConnectionEventReachesTheListeningApps(t *testing.T) {
+	dir, err := ioutil.TempDir("/tmp", "mux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sensorPath, appPath := filepath.Join(dir, "g7.sock"), filepath.Join(dir, "app.sock")
+	sensors := listen(t, sensorPath)
+	l, err := net.Listen("unix", appPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	m := newMux([]string{sensorPath}, &fakeSuspender{})
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go m.serve(c)
+		}
+	}()
+	dial := func() *end {
+		conn, err := net.Dial("unix", appPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return newEnd(t, conn)
+	}
+	phone := dial()
+	sensor := accepted(t, sensors)
+	phone.send(map[string]interface{}{"type": "hello", "bundleId": "org.loopkit.Loop", "pid": 1})
+	sensor.expect("hello")
+	watch := dial()
+	watch.send(map[string]interface{}{"type": "hello", "bundleId": "org.loopkit.Loop.watchkitapp", "pid": 2})
+
+	watch.send(map[string]interface{}{"type": "registerForConnectionEvents"})
+	sensor.expect("registerForConnectionEvents")
+	sensor.send(map[string]interface{}{"type": "connectionEvent", "id": "SENSOR", "event": 1, "name": "DXCMzi"})
+	if got := watch.expect("connectionEvent"); got["name"] != "DXCMzi" {
+		t.Fatalf("connection event %v, want the sensor's name", got)
+	}
+	phone.quiet()
+
+	// Out of range of everything, the watch hears nothing.
+	if err := m.setRange("org.loopkit.Loop.watchkitapp", "", false); err != nil {
+		t.Fatal(err)
+	}
+	sensor.send(map[string]interface{}{"type": "connectionEvent", "id": "SENSOR", "event": 1})
+	watch.quiet()
+}

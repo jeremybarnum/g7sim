@@ -26,8 +26,10 @@ git -C "$src" checkout --quiet --force "$commit"
 # disconnect (#5), retrievePeripheralsWithIdentifiers: forgetting
 # peripherals on relaunch (#6), and the owner of a connect made inside
 # didDisconnect forgotten (0007), and a pending connect reading as
-# disconnected, so an app's cancel of it was skipped (0008), and a released
-# stand-in peripheral aborting the app in CBPeripheral's dealloc (0009).
+# disconnected, so an app's cancel of it was skipped (0008), a released
+# stand-in peripheral aborting the app in CBPeripheral's dealloc (0009), and
+# a connection event reaching one central only, without the peripheral's
+# name (0010).
 for patch in "$here"/impossible-patches/*.patch; do
 	git -C "$src" apply "$patch"
 done
