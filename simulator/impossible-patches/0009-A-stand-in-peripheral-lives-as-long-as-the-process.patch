@@ -1,4 +1,4 @@
-From 440c72e8598081bf3d903e1a1d403e98f45a482d Mon Sep 17 00:00:00 2001
+From 3253ffed34e4c864642a09d1a20064592621c00e Mon Sep 17 00:00:00 2001
 From: Jeremy Barnum <prefer not to supply>
 Date: Tue, 20 Oct 2026 11:57:02 -0400
 Subject: [PATCH] A stand-in peripheral lives as long as the process
@@ -8,35 +8,40 @@ removes an observer CoreBluetooth registered at creation, which a
 stand-in never had. When an app let a central manager go (rebuilding it
 after the provider went away), its stand-in peripherals were released,
 the removal threw, and the app aborted. Each stand-in is now kept for the
-life of the process; they are few and small.
+life of the process; they are few and small. They are kept by identity:
+peripherals compare equal by identifier, and an app with two centrals has
+one stand-in per central for the same device.
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- Sources/ImpossiBLE/CBSProxies.m | 8 ++++++++
- 1 file changed, 8 insertions(+)
+ Sources/ImpossiBLE/CBSProxies.m | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
 
 diff --git a/Sources/ImpossiBLE/CBSProxies.m b/Sources/ImpossiBLE/CBSProxies.m
-index 659f500..5d0f0fb 100644
+index 659f500..e37412f 100644
 --- a/Sources/ImpossiBLE/CBSProxies.m
 +++ b/Sources/ImpossiBLE/CBSProxies.m
-@@ -22,6 +22,11 @@ static id cbs_super_init(id self, Class superclass) {
+@@ -22,6 +22,12 @@ static id cbs_super_init(id self, Class superclass) {
  
  #pragma mark - CBSPeripheral
  
 +// Every stand-in peripheral, kept for the life of the process. A CBPeripheral's own dealloc
 +// expects CoreBluetooth's bookkeeping (it removes an observer CoreBluetooth registered), which a
-+// stand-in never had: released, it threw and the app aborted. Peripherals are few and small.
-+static NSMutableSet *gPinnedPeripherals;
++// stand-in never had: released, it threw and the app aborted. Peripherals are few and small. Kept
++// by identity: peripherals are equal by identifier, and each central has its own for a device.
++static NSHashTable *gPinnedPeripherals;
 +
  @implementation CBSPeripheral {
      NSUUID *_shimIdentifier;
      NSString *_shimName;
-@@ -38,6 +43,9 @@ - (instancetype)initWithIdentifier:(NSUUID *)identifier name:(NSString *)name {
+@@ -38,6 +44,11 @@ - (instancetype)initWithIdentifier:(NSUUID *)identifier name:(NSString *)name {
          _shimDelegate = nil;
          _shimState = CBPeripheralStateDisconnected;
          _shimServices = nil;
 +        static dispatch_once_t once;
-+        dispatch_once(&once, ^{ gPinnedPeripherals = [NSMutableSet set]; });
++        dispatch_once(&once, ^{
++            gPinnedPeripherals = [NSHashTable hashTableWithOptions:NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality];
++        });
 +        @synchronized (gPinnedPeripherals) { [gPinnedPeripherals addObject:self]; }
      }
      return self;
