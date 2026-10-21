@@ -1,0 +1,43 @@
+From 04d4bcb7ccfe543011da8b158e11c5989489dfd6 Mon Sep 17 00:00:00 2001
+From: Jeremy Barnum <prefer not to supply>
+Date: Wed, 21 Oct 2026 01:23:44 -0400
+Subject: [PATCH] A central that goes away cancels its connections
+
+In CoreBluetooth a central manager that is released takes its
+connections with it. ImpossiBLE kept a connect the released central had
+left pending, so the provider still held it: when the peripheral came
+back in range it connected the app that no longer wanted it, and another
+app's connect waited behind a link nobody used. An app that rebuilds its
+central rather than cancelling (OmnipodKit, for a connect that never
+settled) met this. A released central now cancels the connects it owned.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Sources/ImpossiBLE/CBSActivator.m | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/Sources/ImpossiBLE/CBSActivator.m b/Sources/ImpossiBLE/CBSActivator.m
+index 32abb07..3be6a34 100644
+--- a/Sources/ImpossiBLE/CBSActivator.m
++++ b/Sources/ImpossiBLE/CBSActivator.m
+@@ -108,6 +108,17 @@ static dispatch_queue_t cbs_callback_queue_for_peripheral(CBSPeripheral *periphe
+ }
+ 
+ static void cbs_cleanup_central_stores(NSString *key) {
++    // As in CoreBluetooth, a central that goes away takes its connections with it: a connect it
++    // left pending, or a link it held, is cancelled, or the provider keeps it and hands the next
++    // link to an app that no longer wants it.
++    NSDictionary<NSUUID *, CBSPeripheral *> *store = [gPeripheralsByCentral[key] copy];
++    for (NSUUID *uuid in store) {
++        CBPeripheralState state = [store[uuid] state];
++        if ((state == CBPeripheralStateConnecting || state == CBPeripheralStateConnected)
++            && [key isEqualToString:gPeripheralOwners[uuid]]) {
++            CBSConnectionSend(@{@"type": @"cancel", @"id": uuid.UUIDString});
++        }
++    }
+     [gPeripheralsByCentral removeObjectForKey:key];
+     [gServicesByCentral removeObjectForKey:key];
+     [gCharacteristicsByCentral removeObjectForKey:key];
+-- 
+2.50.1 (Apple Git-155)
+
