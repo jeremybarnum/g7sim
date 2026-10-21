@@ -43,6 +43,7 @@ type SimRadio struct {
 	app      string // the app the pending connect comes from
 
 	connEvents bool // the app listens for connection events (another app's link coming up)
+	appWindow  int  // the reading the simulated Dexcom app last connected for
 	link       *simLink
 	mode       g7.AdvertMode
 	tried      time.Time // last attempt to bring up a pending connection
@@ -177,7 +178,7 @@ func NewSimRadio(sensor *g7.Sensor, path string) (*SimRadio, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &SimRadio{sensor: sensor, path: path, listener: l, id: peripheralID(sensor.Serial())}
+	r := &SimRadio{sensor: sensor, path: path, listener: l, id: peripheralID(sensor.Serial()), appWindow: -1}
 	log.Printf("serving the iOS Simulator on %s as peripheral %s", path, r.id)
 	go r.accept()
 	return r, nil
@@ -623,12 +624,13 @@ func (r *SimRadio) Run() {
 			if mode == g7.AdvertFull && scanning && c != nil {
 				r.discovered(c)
 			}
-			if mode == g7.AdvertFull && g7.DexcomApp && connEvents && c != nil {
-				// The Dexcom app connects for the reading: an app listening for connection
-				// events hears the link come up, and may join it.
-				log.Printf("the Dexcom app connects for the reading: connection event to the listening apps")
-				c.send(map[string]interface{}{"type": "connectionEvent", "id": r.id, "event": 1, "name": r.sensor.Name()})
-			}
+		}
+		// The Dexcom app connects once for each reading: an app listening for connection events
+		// hears the link come up, and may join it.
+		if w := r.sensor.Window(); g7.DexcomApp && connEvents && c != nil && mode != g7.AdvertOff && w >= 0 && w != r.appWindow {
+			r.appWindow = w
+			log.Printf("the Dexcom app connects for reading %d: connection event to the listening apps", w)
+			c.send(map[string]interface{}{"type": "connectionEvent", "id": r.id, "event": 1, "name": r.sensor.Name()})
 		}
 		r.tryConnect(now)
 	}

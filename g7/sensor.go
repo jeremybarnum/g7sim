@@ -432,6 +432,16 @@ func (s *Sensor) Served(addr string, displayType byte, now time.Time) {
 	}
 }
 
+// Window is the reading the sensor is advertising now, or -1 between windows.
+func (s *Sensor) Window() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.win == nil {
+		return -1
+	}
+	return s.win.index
+}
+
 func (s *Sensor) Latest() (*Reading, uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
