@@ -1,6 +1,6 @@
-From 04d4bcb7ccfe543011da8b158e11c5989489dfd6 Mon Sep 17 00:00:00 2001
+From 186cf124d50de420d375c95adc1e921a04a47301 Mon Sep 17 00:00:00 2001
 From: Jeremy Barnum <prefer not to supply>
-Date: Wed, 21 Oct 2026 01:23:44 -0400
+Date: Wed, 21 Oct 2026 02:06:42 -0400
 Subject: [PATCH] A central that goes away cancels its connections
 
 In CoreBluetooth a central manager that is released takes its
@@ -9,35 +9,76 @@ left pending, so the provider still held it: when the peripheral came
 back in range it connected the app that no longer wanted it, and another
 app's connect waited behind a link nobody used. An app that rebuilds its
 central rather than cancelling (OmnipodKit, for a connect that never
-settled) met this. A released central now cancels the connects it owned.
+settled) met this. Each central's connects are now recorded, and a
+released central cancels them, unless another central of the same app
+has the device pending or connected: the provider tells apps apart, not
+centrals.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- Sources/ImpossiBLE/CBSActivator.m | 11 +++++++++++
- 1 file changed, 11 insertions(+)
+ Sources/ImpossiBLE/CBSActivator.m | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
 
 diff --git a/Sources/ImpossiBLE/CBSActivator.m b/Sources/ImpossiBLE/CBSActivator.m
-index 32abb07..3be6a34 100644
+index 32abb07..9fd9ce0 100644
 --- a/Sources/ImpossiBLE/CBSActivator.m
 +++ b/Sources/ImpossiBLE/CBSActivator.m
-@@ -108,6 +108,17 @@ static dispatch_queue_t cbs_callback_queue_for_peripheral(CBSPeripheral *periphe
+@@ -30,6 +30,9 @@
+ static NSHashTable<CBCentralManager *> *gConnectionEventCentrals;
+ static NSMapTable<NSString *, CBCentralManager *> *gCentralByKey;
+ static NSMutableDictionary<NSUUID *, NSString *> *gPeripheralOwners;
++// The connects each central has made and not cancelled, by central key: a central that goes away
++// takes them with it, as in CoreBluetooth.
++static NSMutableDictionary<NSString *, NSMutableSet<NSUUID *> *> *gConnectsByCentral;
+ static NSDictionary *gActiveScanPayload;
+ static NSMutableDictionary<NSString *, NSMutableDictionary<NSUUID *, CBSPeripheral *> *> *gPeripheralsByCentral;
+ static NSMutableDictionary<NSString *, NSMutableDictionary<NSString *, CBSService *> *> *gServicesByCentral;
+@@ -108,6 +111,23 @@ static dispatch_queue_t cbs_callback_queue_for_peripheral(CBSPeripheral *periphe
  }
  
  static void cbs_cleanup_central_stores(NSString *key) {
 +    // As in CoreBluetooth, a central that goes away takes its connections with it: a connect it
 +    // left pending, or a link it held, is cancelled, or the provider keeps it and hands the next
-+    // link to an app that no longer wants it.
-+    NSDictionary<NSUUID *, CBSPeripheral *> *store = [gPeripheralsByCentral[key] copy];
-+    for (NSUUID *uuid in store) {
-+        CBPeripheralState state = [store[uuid] state];
-+        if ((state == CBPeripheralStateConnecting || state == CBPeripheralStateConnected)
-+            && [key isEqualToString:gPeripheralOwners[uuid]]) {
++    // link to an app that no longer wants it. Not when another central of the app has the same
++    // device pending or connected: the provider tells apps apart, not centrals.
++    for (NSUUID *uuid in [gConnectsByCentral[key] copy]) {
++        BOOL elsewhere = NO;
++        for (NSString *other in gConnectsByCentral) {
++            if (![other isEqualToString:key] && [gConnectsByCentral[other] containsObject:uuid]) {
++                elsewhere = YES;
++            }
++        }
++        if (!elsewhere) {
++            NSLog(@"ImpossiBLE: a released central's connect to %@ cancelled", uuid.UUIDString);
 +            CBSConnectionSend(@{@"type": @"cancel", @"id": uuid.UUIDString});
 +        }
 +    }
++    [gConnectsByCentral removeObjectForKey:key];
      [gPeripheralsByCentral removeObjectForKey:key];
      [gServicesByCentral removeObjectForKey:key];
      [gCharacteristicsByCentral removeObjectForKey:key];
+@@ -1819,6 +1839,13 @@ static void cbs_connect_peripheral(id self, SEL _cmd, id peripheral, NSDictionar
+             gPeripheralOwners = [NSMutableDictionary dictionary];
+         }
+         gPeripheralOwners[uuid] = cbs_central_key(central);
++        if (!gConnectsByCentral) {
++            gConnectsByCentral = [NSMutableDictionary dictionary];
++        }
++        if (!gConnectsByCentral[cbs_central_key(central)]) {
++            gConnectsByCentral[cbs_central_key(central)] = [NSMutableSet set];
++        }
++        [gConnectsByCentral[cbs_central_key(central)] addObject:uuid];
+         // As in CoreBluetooth, a connect not yet made reads as connecting until it goes through or
+         // is cancelled, so an app that cancels pending connects by their state finds this one.
+         if ([peripheral isKindOfClass:[CBSPeripheral class]] && [(CBSPeripheral *)peripheral state] == CBPeripheralStateDisconnected) {
+@@ -1843,6 +1870,7 @@ static void cbs_cancel(id self, SEL _cmd, id peripheral) {
+             gPeripheralOwners[uuid] = cbs_central_key(central);
+         }
+         CBSConnectionSend(@{@"type": @"cancel", @"id": uuid.UUIDString});
++        [gConnectsByCentral[cbs_central_key(central)] removeObject:uuid];
+         // A cancelled connect that never went through is over at once.
+         if ([peripheral isKindOfClass:[CBSPeripheral class]] && [(CBSPeripheral *)peripheral state] == CBPeripheralStateConnecting) {
+             [(CBSPeripheral *)peripheral cbs_setState:CBPeripheralStateDisconnected];
 -- 
 2.50.1 (Apple Git-155)
 
