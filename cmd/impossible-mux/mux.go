@@ -681,6 +681,16 @@ func (m *mux) fromApp(a *app, raw []byte, msg map[string]interface{}) {
 			return
 		case h == a:
 			to = m.targets(id)
+			if len(to) == 0 && len(all) > 0 {
+				// The app's earlier connect is still on its way (held by the connect delay)
+				// and no provider has claimed the peripheral yet: ask them all again.
+				pend := map[int]bool{}
+				for _, i := range all {
+					pend[i] = true
+				}
+				m.pending[id] = pend
+				to = all
+			}
 		default:
 			m.holder[id] = a
 			m.holdRaw[id] = raw

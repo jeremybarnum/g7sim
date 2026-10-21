@@ -692,3 +692,43 @@ func TestAConnectWaitsOutTheDelay(t *testing.T) {
 	}
 	pod.quiet()
 }
+
+// A second connect from the same app while its first is still held by the delay, to a peripheral no
+// provider has claimed yet (retrieved by the app after a restart), reaches the provider: it is not
+// refused as an unknown peripheral.
+func TestARepeatedConnectWithinTheDelayIsNotRefused(t *testing.T) {
+	dir, err := ioutil.TempDir("/tmp", "mux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	podPath, appPath := filepath.Join(dir, "pod.sock"), filepath.Join(dir, "app.sock")
+	pods := listen(t, podPath)
+	l, err := net.Listen("unix", appPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	m := newMux([]string{podPath}, &fakeSuspender{})
+	m.connectDelay = 300 * time.Millisecond
+	go func() {
+		c, err := l.Accept()
+		if err == nil {
+			m.serve(c)
+		}
+	}()
+	conn, err := net.Dial("unix", appPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := newEnd(t, conn)
+	pod := accepted(t, pods)
+	app.send(map[string]interface{}{"type": "hello", "bundleId": "org.loopkit.Loop", "pid": 1})
+	pod.expect("hello")
+
+	app.send(map[string]interface{}{"type": "connect", "id": "POD"})
+	time.Sleep(100 * time.Millisecond)
+	app.send(map[string]interface{}{"type": "connect", "id": "POD"})
+	app.quiet()
+	pod.expect("connect")
+}
