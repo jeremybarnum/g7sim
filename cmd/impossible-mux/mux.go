@@ -64,6 +64,11 @@ type mux struct {
 	providers []string
 	suspend   suspender // set: each app is stopped while iOS would have it suspended
 
+	// connectDelay holds an app's connect this long before the provider makes it, as a radio
+	// takes time to bring a link up; zero, at once.
+	connectDelay time.Duration
+	delayed      map[string]*held // the connect each peripheral's delay holds; a cancel clears it
+
 	mu       sync.Mutex
 	apps     map[*app]bool
 	backends []*line // one connection per provider, nil while it is down
@@ -732,6 +737,33 @@ func (m *mux) fromApp(a *app, raw []byte, msg map[string]interface{}) {
 			log.Printf("app: %s for unknown peripheral %s dropped", t, id)
 		}
 		return
+	}
+	if t == "connect" && m.connectDelay > 0 {
+		// Made later, if the app still wants it: a cancel meanwhile ends it.
+		h := &held{a, raw}
+		m.mu.Lock()
+		if m.delayed == nil {
+			m.delayed = map[string]*held{}
+		}
+		m.delayed[id] = h
+		m.mu.Unlock()
+		time.AfterFunc(m.connectDelay, func() {
+			m.mu.Lock()
+			still := m.delayed[id] == h && m.holder[id] == a && !a.closed
+			if still {
+				delete(m.delayed, id)
+			}
+			m.mu.Unlock()
+			if still {
+				m.sendTo(to, raw)
+			}
+		})
+		return
+	}
+	if t == "cancel" {
+		m.mu.Lock()
+		delete(m.delayed, id)
+		m.mu.Unlock()
 	}
 	m.sendTo(to, raw)
 }

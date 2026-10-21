@@ -43,6 +43,7 @@ func main() {
 	socket := flag.String("socket", "/tmp/impossible.sock", "the socket ImpossiBLE connects the app to")
 	simulator := flag.String("simulator", "", "the app's simulator (name or UDID), for -suspend")
 	suspendApp := flag.Bool("suspend", false, "stop the app while iOS would have it suspended, waking it for Bluetooth events")
+	connectDelay := flag.Duration("connect-delay", 0, "hold each app's connect this long before the provider makes it, as a radio takes time to bring a link up")
 	api := flag.String("api", "", "address of the range API, e.g. :8087: GET /range; POST /range?app=<bundle id>&in=0|1 or ?provider=<part of a socket path>&in=0|1")
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "usage: %s [-socket path] [-suspend -simulator name] provider.sock...\n", os.Args[0])
@@ -72,6 +73,7 @@ func main() {
 	}
 	log.Printf("serving %s for %v", *socket, flag.Args())
 	m := newMux(flag.Args(), s)
+	m.connectDelay = *connectDelay
 	if *api != "" {
 		go serveAPI(*api, m)
 	}

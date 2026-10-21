@@ -635,3 +635,60 @@ func TestAConnectionEventReachesTheListeningApps(t *testing.T) {
 	sensor.send(map[string]interface{}{"type": "connectionEvent", "id": "SENSOR", "event": 1})
 	watch.quiet()
 }
+
+// With a connect delay, the provider hears an app's connect only after it, as a radio takes time
+// to bring a link up; a cancel within the delay ends the connect before the provider hears it.
+func TestAConnectWaitsOutTheDelay(t *testing.T) {
+	dir, err := ioutil.TempDir("/tmp", "mux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	podPath, appPath := filepath.Join(dir, "pod.sock"), filepath.Join(dir, "app.sock")
+	pods := listen(t, podPath)
+	l, err := net.Listen("unix", appPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	m := newMux([]string{podPath}, &fakeSuspender{})
+	m.connectDelay = 300 * time.Millisecond
+	go func() {
+		c, err := l.Accept()
+		if err == nil {
+			m.serve(c)
+		}
+	}()
+	conn, err := net.Dial("unix", appPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := newEnd(t, conn)
+	pod := accepted(t, pods)
+	app.send(map[string]interface{}{"type": "hello", "bundleId": "org.loopkit.Loop", "pid": 1})
+	pod.expect("hello")
+	app.send(map[string]interface{}{"type": "scan"})
+	pod.expect("scan")
+	pod.send(map[string]interface{}{"type": "didDiscover", "id": "POD"})
+	app.expect("didDiscover")
+
+	sent := time.Now()
+	app.send(map[string]interface{}{"type": "connect", "id": "POD"})
+	pod.expect("connect")
+	if waited := time.Since(sent); waited < 250*time.Millisecond {
+		t.Fatalf("the provider heard the connect after %v, want the 300 ms delay", waited)
+	}
+
+	pod.send(map[string]interface{}{"type": "didDisconnect", "id": "POD"})
+	app.expect("didDisconnect")
+	app.send(map[string]interface{}{"type": "connect", "id": "POD"})
+	app.send(map[string]interface{}{"type": "cancel", "id": "POD"})
+	time.Sleep(400 * time.Millisecond)
+	for {
+		got := pod.expect("cancel")
+		if got != nil {
+			break
+		}
+	}
+	pod.quiet()
+}
