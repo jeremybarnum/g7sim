@@ -229,6 +229,46 @@ func TestTheDexcomAppsSessionForAnObserver(t *testing.T) {
 	}
 }
 
+// Two observers in one window, as a phone and a watch each riding their own Dexcom app: the
+// first is served as the phone, the second as the watch, and both get the reading.
+func TestASecondObserverInAWindowIsServedAsTheWatch(t *testing.T) {
+	DexcomApp = true
+	defer func() { DexcomApp = false }()
+	s, _ := newTestSensor(t)
+	s.Tick(time.Now())
+
+	serve := func(addr string) {
+		link := newFakeLink()
+		link.addr = addr
+		h := newHandler(s, link, AdvertFull)
+		h.Subscribed(CharAuth)
+		h.Subscribed(CharControl)
+		select {
+		case c := <-link.out:
+			if c.char != CharAuth {
+				t.Fatalf("%s: first notification %v, want the authentication status", addr, c.char)
+			}
+		case <-time.After(dexcomAppWait + 2*time.Second):
+			t.Fatalf("%s: no authentication status — not admitted", addr)
+		}
+		if g := link.recv(t); g.char != CharControl || g.data[0] != opGlucose {
+			t.Fatalf("%s: %v %x, want the reading", addr, g.char, g.data)
+		}
+		<-link.closed
+	}
+	serve("PH:ON:E1")
+	serve("WA:TC:H1")
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.win.servedTypes[DisplayPhone] || !s.win.servedTypes[DisplayWatch] {
+		t.Fatalf("served types %v, want the phone's and the watch's", s.win.servedTypes)
+	}
+	if s.addrTypes["WA:TC:H1"] != DisplayWatch {
+		t.Fatalf("second observer filed as %d, want the watch", s.addrTypes["WA:TC:H1"])
+	}
+}
+
 // A client that authenticates itself is not mistaken for an observer.
 func TestAnAuthenticatingClientIsServedAsBefore(t *testing.T) {
 	DexcomApp = true

@@ -428,9 +428,12 @@ func (h *handler) handleControl(msg []byte) {
 // hangs up.
 func (h *handler) observed() {
 	now := time.Now()
-	h.displayType = DisplayPhone
 	if a, ok := h.link.(AppDisplay); ok {
 		h.displayType = a.AppDisplay()
+	} else {
+		// Over real Bluetooth a link cannot say which device it is on: the first observer in a
+		// window is the phone's Dexcom app, another one the watch's.
+		h.displayType = h.sensor.ObserverDisplay(h.link.Addr())
 	}
 	if !h.sensor.AdmitDisplay(h.link.Addr(), h.displayType, now, h.mode) {
 		return

@@ -344,6 +344,22 @@ func (s *Sensor) LinkClosed(now time.Time) {
 
 // AdmitDisplay is the check at the client's challenge, once its display type
 // is known.
+// ObserverDisplay picks the display a client that does not authenticate rides, when its link
+// cannot say: the phone's, unless the phone's display already collected this window's reading
+// from another address, then the watch's. So a phone and a watch that both only observe (each
+// riding its own Dexcom app) both get the reading, as with a real sensor.
+func (s *Sensor) ObserverDisplay(addr string) byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if t, ok := s.addrTypes[addr]; ok && s.win != nil && s.win.servedAddrs[addr] {
+		return t
+	}
+	if s.win != nil && s.win.servedTypes[DisplayPhone] && !s.win.servedTypes[DisplayWatch] {
+		return DisplayWatch
+	}
+	return DisplayPhone
+}
+
 func (s *Sensor) AdmitDisplay(addr string, displayType byte, now time.Time, mode AdvertMode) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
