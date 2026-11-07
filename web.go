@@ -113,8 +113,10 @@ const indexHTML = `<!doctype html>
 
   <div class="card">
     <h2>Display slots</h2>
-    <table><thead><tr><th>Type</th><th>Held</th><th>Last seen</th><th>Misses</th></tr></thead>
-    <tbody id="slots"><tr><td colspan="4" class="muted">none yet</td></tr></tbody></table>
+    <table><thead><tr><th>Type</th><th>Held</th><th>Last seen</th><th>Misses</th><th>Muted</th></tr></thead>
+    <tbody id="slots"><tr><td colspan="5" class="muted">none yet</td></tr></tbody></table>
+    <div style="margin-top:14px"><button id="muteWatch">Mute the watch</button></div>
+    <div class="muted" style="margin-top:6px">A muted display is refused every reading, as if out of range; the others still collect. Ends when unmuted or the emulator restarts.</div>
     <div style="margin-top:14px"><button class="danger" id="forget">Forget all keys</button></div>
     <div class="muted" style="margin-top:6px">Drops every display's key, so the next connection pairs again.</div>
   </div>
@@ -148,7 +150,7 @@ const indexHTML = `<!doctype html>
 const TYPE = {1:"medical",2:"phone",3:"watch",4:"receiver",5:"pump"};
 const STATE = {2:["warmup","warn"],3:["excess noise","warn"],6:["ok","ok"],7:["needs calibration","warn"],
   15:["session expired","bad"],18:["temporary issue","warn"],24:["expired","bad"],25:["sensor failed","bad"],1:["stopped","bad"]};
-let kind = "sine", touched = false, serverMode = {};
+let kind = "sine", touched = false, serverMode = {}, watchMuted = false;
 
 function formDirty(){
   const v=+document.getElementById('value').value, st=+document.getElementById('algostate').value;
@@ -195,6 +197,8 @@ async function applyGlucose(){
 document.getElementById('applyGlucose').onclick = applyGlucose;
 document.getElementById('algostate').onchange = ()=>{ touched=true; updateApply(); };
 document.getElementById('forget').onclick = async()=>{ await fetch('/forget',{method:'POST'}); refresh(); };
+document.getElementById('muteWatch').onclick = async()=>{
+  await fetch('/mute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({displayType:3,muted:!watchMuted})}); refresh(); };
 
 async function refresh(){
   let s; try { s = await (await fetch('/status')).json(); } catch(e){ return; }
@@ -225,10 +229,12 @@ async function refresh(){
     if(g.periodMinutes!=null) document.getElementById('period').value=g.periodMinutes;
     document.getElementById('algostate').value = g.algorithmState||0; }
   updateApply();
+  const muted = s.muted||[]; watchMuted = muted.includes(3);
+  document.getElementById('muteWatch').textContent = watchMuted ? 'Unmute the watch' : 'Mute the watch';
   const tb = document.getElementById('slots'); const keys = Object.keys(s.slots||{});
   tb.innerHTML = keys.length ? keys.map(k=>{const sl=s.slots[k];
-    return '<tr><td>'+(TYPE[k]||k)+'</td><td>'+(sl.held?'yes':'no')+'</td><td>'+ago(sl.lastSeen)+'</td><td>'+sl.misses+'</td></tr>';}).join('')
-    : '<tr><td colspan="4" class="muted">none yet</td></tr>';
+    return '<tr><td>'+(TYPE[k]||k)+'</td><td>'+(sl.held?'yes':'no')+'</td><td>'+ago(sl.lastSeen)+'</td><td>'+sl.misses+'</td><td>'+(muted.includes(+k)?'yes':'no')+'</td></tr>';}).join('')
+    : '<tr><td colspan="5" class="muted">none yet</td></tr>';
 }
 const PRESET = {10:{lifetime:240, warmup:27}, 15:{lifetime:360, warmup:62}};
 const field = id=>document.getElementById(id);

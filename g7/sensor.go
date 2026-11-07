@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"time"
 )
@@ -114,6 +115,7 @@ type Sensor struct {
 	rejections  int
 	lockedUntil time.Time
 	addrTypes   map[string]byte // display type each address last authenticated as
+	muted       map[byte]bool   // display types refused every reading, as if out of range; not saved
 }
 
 func NewSensor(state *State, path string, timing Timing) *Sensor {
@@ -126,6 +128,7 @@ func NewSensor(state *State, path string, timing Timing) *Sensor {
 		path:      path,
 		glucose:   NewGlucoseModel(state),
 		addrTypes: map[string]byte{},
+		muted:     map[byte]bool{},
 	}
 	s.fillReadings(time.Now())
 	return s
@@ -364,6 +367,10 @@ func (s *Sensor) AdmitDisplay(addr string, displayType byte, now time.Time, mode
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.addrTypes[addr] = displayType
+	if s.muted[displayType] {
+		log.Printf("%s: display type %d is muted; dropping", addr, displayType)
+		return false
+	}
 	if s.win != nil && s.win.servedTypes[displayType] {
 		log.Printf("%s: display type %d already collected reading %d; dropping", addr, displayType, s.win.index)
 		return false
@@ -520,7 +527,7 @@ func (s *Sensor) Status() map[string]interface{} {
 		"name": s.Name(), "serial": s.state.Serial, "code": s.state.Code,
 		"model": s.Model(), "days": s.state.Days,
 		"lifetimeHours": s.state.Lifetime().Hours(), "warmupMinutes": s.state.Warmup.Minutes(),
-		"activation": s.state.Activation, "slots": slots,
+		"activation": s.state.Activation, "slots": slots, "muted": s.mutedTypes(),
 		"glucoseMode": s.glucose.Describe(),
 	}
 	if r := s.state.latest(); r != nil {
@@ -545,6 +552,27 @@ func (s *Sensor) SetGlucoseMode(m GlucoseMode) {
 	s.glucose.SetMode(m)
 	s.state.Glucose = m
 	s.save()
+}
+
+// SetMuted refuses (or again admits) one display type, so it misses readings while the others
+// collect them. Lasts until the emulator restarts.
+func (s *Sensor) SetMuted(displayType byte, muted bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if muted {
+		s.muted[displayType] = true
+	} else {
+		delete(s.muted, displayType)
+	}
+}
+
+func (s *Sensor) mutedTypes() []int {
+	out := []int{}
+	for t := range s.muted {
+		out = append(out, int(t))
+	}
+	sort.Ints(out)
+	return out
 }
 
 // ForgetSlots drops every display's key, as a sensor replaced in place would.

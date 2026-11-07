@@ -230,3 +230,20 @@ func TestExtendedVersionMatchesCaptures(t *testing.T) {
 		}
 	}
 }
+
+func TestMutedDisplayIsRefusedWhileTheOthersCollect(t *testing.T) {
+	s, act := newTestSensor(t)
+	reading := act.Add(2 * time.Hour)
+	s.Tick(at(reading, 3))
+	s.SetMuted(DisplayWatch, true)
+	if s.AdmitDisplay("WW", DisplayWatch, at(reading, 4), AdvertFull) {
+		t.Fatal("a muted watch got in")
+	}
+	if !s.AdmitDisplay("PP", DisplayPhone, at(reading, 4), AdvertFull) {
+		t.Fatal("the phone was refused while only the watch was muted")
+	}
+	s.SetMuted(DisplayWatch, false)
+	if !s.AdmitDisplay("WW", DisplayWatch, at(reading, 5), AdvertFull) {
+		t.Fatal("an unmuted watch was refused")
+	}
+}

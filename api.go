@@ -17,6 +17,9 @@ import (
 //	               {"kind":"walk","value":140}
 //	               add "algorithmState":18 to simulate a sensor issue
 //	POST /forget                 drop every display's key
+//	POST /mute     {"displayType":3,"muted":true}
+//	               refuse one display type (2 phone, 3 watch) every reading until
+//	               unmuted or restarted
 //	POST /force-quit             (-transport impossible) the app's end is a force-quit:
 //	                             drop what it left lodged instead of relaunching it
 //	POST /new      {"model":"stelo","days":15,"code":"1234","serial":0,
@@ -56,6 +59,23 @@ func serveAPI(addr string, sensor *g7.Sensor, replace func(*g7.State)) {
 		}
 		sensor.ForgetSlots()
 		log.Printf("forgot every display's key")
+		writeJSON(w, sensor.Status())
+	})
+	http.HandleFunc("/mute", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST a display type to mute", http.StatusMethodNotAllowed)
+			return
+		}
+		var m struct {
+			DisplayType byte `json:"displayType"`
+			Muted       bool `json:"muted"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&m); err != nil || m.DisplayType == 0 {
+			http.Error(w, "bad mute request", http.StatusBadRequest)
+			return
+		}
+		sensor.SetMuted(m.DisplayType, m.Muted)
+		log.Printf("display type %d muted: %v", m.DisplayType, m.Muted)
 		writeJSON(w, sensor.Status())
 	})
 	http.HandleFunc("/new", func(w http.ResponseWriter, r *http.Request) {
