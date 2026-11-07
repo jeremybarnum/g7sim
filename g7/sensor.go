@@ -220,6 +220,11 @@ func (s *Sensor) Tick(now time.Time) AdvertMode {
 		// minute calls have ended; nothing on the air.
 		return AdvertOff
 	}
+	// A muted display must hear nothing, as if out of range: a connection it is then refused
+	// still wakes it. So once the phone has its reading the sensor goes quiet.
+	if len(s.muted) > 0 && w.servedTypes[DisplayPhone] {
+		return AdvertOff
+	}
 	if now.Before(s.burstEnd(now)) {
 		return AdvertFull
 	}
@@ -266,7 +271,7 @@ func (s *Sensor) burstEnd(now time.Time) time.Time {
 	}
 	missing, extended := false, false
 	for typ, slot := range s.state.Slots {
-		if s.isHeld(slot, now) && !w.servedTypes[typ] {
+		if s.isHeld(slot, now) && !w.servedTypes[typ] && !s.muted[typ] {
 			missing = true
 			if slot.Misses < t.ExtendedWindows {
 				extended = true
@@ -555,7 +560,8 @@ func (s *Sensor) SetGlucoseMode(m GlucoseMode) {
 }
 
 // SetMuted refuses (or again admits) one display type, so it misses readings while the others
-// collect them. Lasts until the emulator restarts.
+// collect them: the sensor stops advertising once the phone has its reading, and never extends a
+// window for a muted display. Lasts until the emulator restarts.
 func (s *Sensor) SetMuted(displayType byte, muted bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

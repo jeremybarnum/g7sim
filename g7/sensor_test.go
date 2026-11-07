@@ -247,3 +247,18 @@ func TestMutedDisplayIsRefusedWhileTheOthersCollect(t *testing.T) {
 		t.Fatal("an unmuted watch was refused")
 	}
 }
+
+func TestMutedWatchFindsNothingOnceThePhoneHasItsReading(t *testing.T) {
+	s, act := newTestSensor(t)
+	reading := act.Add(2 * time.Hour)
+	s.state.Slots[DisplayPhone] = &Slot{Key: make([]byte, 16), LastSeen: reading.Add(-5 * time.Minute)}
+	s.state.Slots[DisplayWatch] = &Slot{Key: make([]byte, 16), LastSeen: reading.Add(-5 * time.Minute)}
+	s.SetMuted(DisplayWatch, true)
+
+	s.Tick(at(reading, 3))
+	if !s.LinkOpened("PP", at(reading, 3), AdvertFull) {
+		t.Fatal("phone refused")
+	}
+	s.Served("PP", DisplayPhone, at(reading, 4))
+	expectModes(t, s, reading, map[float64]AdvertMode{4.5: AdvertOff, 9: AdvertOff, 30: AdvertOff, 61: AdvertOff})
+}
