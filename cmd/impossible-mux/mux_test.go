@@ -732,3 +732,57 @@ func TestARepeatedConnectWithinTheDelayIsNotRefused(t *testing.T) {
 	app.quiet()
 	pod.expect("connect")
 }
+
+// A vanished connect: the provider is told to cancel, the app hears nothing, and the next connect
+// from the app goes through as usual.
+func TestAVanishedConnectIsCancelledWithoutTellingTheApp(t *testing.T) {
+	dir, err := ioutil.TempDir("/tmp", "mux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	g7Path, appPath := filepath.Join(dir, "g7.sock"), filepath.Join(dir, "app.sock")
+	g7s := listen(t, g7Path)
+	l, err := net.Listen("unix", appPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	m := newMux([]string{g7Path}, nil)
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go m.serve(c)
+		}
+	}()
+	conn, err := net.Dial("unix", appPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	watch := newEnd(t, conn)
+	g7 := accepted(t, g7s)
+	watch.send(map[string]interface{}{"type": "hello", "bundleId": "org.loopkit.Loop.watchkitapp", "pid": 2})
+	g7.expect("hello")
+
+	watch.send(map[string]interface{}{"type": "connect", "id": "G7"})
+	g7.expect("connect")
+
+	if n, err := m.vanish("org.loopkit.Loop.watchkitapp"); err != nil || n != 1 {
+		t.Fatalf("vanish dropped %d (%v), want 1", n, err)
+	}
+	g7.expect("cancel")
+	g7.send(map[string]interface{}{"type": "didDisconnect", "id": "G7"})
+	watch.quiet() // the app hears nothing
+
+	watch.send(map[string]interface{}{"type": "connect", "id": "G7"})
+	g7.expect("connect")
+	g7.send(map[string]interface{}{"type": "didConnect", "id": "G7"})
+	watch.expect("didConnect")
+
+	if _, err := m.vanish(""); err == nil {
+		t.Fatal("vanish with no app should be refused")
+	}
+}

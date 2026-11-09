@@ -110,5 +110,13 @@ func serveAPI(addr string, m *mux) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(m.rangeState())
 	})
+	http.HandleFunc("/vanish", func(w http.ResponseWriter, r *http.Request) {
+		n, err := m.vanish(r.URL.Query().Get("app"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		fmt.Fprintf(w, "{\"dropped\": %d}\n", n)
+	})
 	log.Fatal(http.ListenAndServe(addr, nil))
 }

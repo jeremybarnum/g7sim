@@ -1013,3 +1013,51 @@ func canonicalUUID(u string) string {
 	}
 	return u
 }
+
+// vanish drops an app's standing connects without telling it, as on 2026-10-05 when iOS honoured a
+// cancel and never called back: the app still believes its request stands, and none does. A link
+// already up is left alone. Returns how many requests were dropped.
+func (m *mux) vanish(bundle string) (int, error) {
+	if bundle == "" {
+		return 0, fmt.Errorf("vanish needs app=<bundle id>")
+	}
+	m.mu.Lock()
+	var cancels []string
+	n := 0
+	for id, h := range m.holder {
+		if h.bundle != bundle || m.connected[id] {
+			continue
+		}
+		delete(m.holder, id)
+		delete(m.holdRaw, id)
+		if d := m.delayed[id]; d != nil && d.app == h {
+			delete(m.delayed, id)
+		}
+		m.cutting[id] = true // the provider's answer to the cancel is not passed on
+		cancels = append(cancels, id)
+		n++
+	}
+	for id, hs := range m.waiting {
+		var keep []*held
+		for _, w := range hs {
+			if w.app.bundle == bundle {
+				n++
+				continue
+			}
+			keep = append(keep, w)
+		}
+		m.waiting[id] = keep
+	}
+	m.mu.Unlock()
+	log.Printf("vanish: app %q, %d standing connect(s) dropped without a callback", bundle, n)
+	for _, id := range cancels {
+		m.mu.Lock()
+		to := m.targets(id)
+		m.mu.Unlock()
+		raw, _ := json.Marshal(map[string]interface{}{"type": "cancel", "id": id})
+		m.sendTo(to, raw)
+		id := id
+		time.AfterFunc(1500*time.Millisecond, func() { m.cutDone(id) })
+	}
+	return n, nil
+}
