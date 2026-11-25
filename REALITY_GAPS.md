@@ -46,16 +46,14 @@ Status: open unless marked otherwise. Candidates for one pull request.
 - **Hid:** every emulator run from mid-October showed the watch's first contact succeeding from behind the clock,
   which led to wait screens that tell the user nothing is needed. G7SensorKit itself has carried the rule since
   10-23 (the "Sensor Pairing Not Finished" alert).
-- **Fix:** one setting, off by default so unattended pairings in the test rig keep working (`sim.sh start -fresh`, a
-  time-scale change, `/forget`, `/new` all pair with nobody there). A flag beside `-dexcom-app` (and kept by the
-  `/new` re-exec), a `POST /bond` in the style of `/mute`, a control in the web page's "Display slots" card, and an
-  environment variable in the harness's `sim.sh`. Levels, cheapest first:
-  - *refuse*: answer `05 01 02`, `06 00`, `07 00`, hang up 0.2 s later, never serve glucose, keep the key as "not
-    bonded". Reproduces the background failure on both transports; can't show success.
-  - *ask*: hold the link up to 30 s for an operator's accept (API or web button), then send `08 01` and serve.
-    Reproduces "someone must act within 30 s"; in the Simulator the accept could follow whether the app is in front.
-  - *request* (Pi only): send a real security request and let the real watch or phone decide. Untested idea.
-  - *full*: real LE Secure Connections pairing in the emulator's Bluetooth stack, with stored keys.
+- **Fixed (e1434a6), as a setting:** `-bond off|refuse|ask`, `POST /bond`, and a control in the web page's
+  "Display slots" card. Default *off* bonds at once, so unattended pairings in the test rig keep working. *refuse*
+  hangs up 0.2 s after `07 00` and serves nothing (the app not in front). *ask* holds the link 31 s for Pair from the
+  API or the page, then sends `08 01` and serves. Every new key now gets `05 01 02`; an unbonded key is kept and gets
+  `05 01 02` at the next connection, and the display bonds again. "Forget bond" plays a display forgetting the
+  sensor in its Bluetooth settings. Still open: the key-discard rule (here a key never lapses), one-minute
+  connections for an unbonded display (gap 13), and two levels not built: *request* (Pi only: a real security
+  request, the real device decides) and *full* (real LE Secure Connections pairing in the emulator's stack).
 
 ### 2. Dexcom-app mode: no answer to the key-challenge nonce
 
@@ -68,19 +66,27 @@ Status: open unless marked otherwise. Candidates for one pull request.
 - **Real G7:** keeps its advertising schedule whatever a display does.
 - **Emulator:** missed the watch's disconnect (11-24 17:03:11) and never advertised again, locking out the phone too.
 
-### 4. Dexcom-app mode: the 2-second listener guess
+### 4. Dexcom-app mode: the 2-second listener guess (fixed, 6a7b727)
+
+- **Fix:** the emulator now tells an observer by what it listens to: G7SensorKit authenticating listens to the
+  certificate characteristic first; observing, the authentication characteristic alone. No timing.
 
 - **Real G7:** tells displays apart by the key each one authenticates with, not by timing.
 - **Emulator:** treats a client that doesn't write within 2 s as a listener and hands it the reading. A suspended
   (slow) watch gets taken for a listener, so its pairing round 1 gets no answer (11-23 20:36:42).
 
-### 5. Dexcom-app mode: one display's reading booked to another's slot
+### 5. Dexcom-app mode: one display's reading booked to another's slot (fixed, 6a7b727)
+
+- **Fix:** a second observer is booked to the watch only when no client of ours holds the watch's key.
 
 - **Real G7:** each display type collects its own reading.
 - **Emulator:** booked the phone's reading to the watch's slot (display type 3, 11-24 17:34:13), then dropped the watch
   twice with "display type 3 already collected".
 
-### 6. Dexcom-app mode: keeps advertising as unpaired after serving
+### 6. Dexcom-app mode: keeps advertising as unpaired after serving (fixed, 6a7b727)
+
+- **Fix:** the simulated Dexcom app holds the slot of the display it rides (with the app's key, which no client
+  of ours knows), so the sensor follows its grid. The question below, for a sensor with no display at all, stays.
 
 - **Real G7:** goes quiet once its displays have the reading.
 - **Emulator:** the simulated Dexcom app holds no slot, so the emulator keeps advertising as unpaired and the phone
@@ -94,7 +100,10 @@ Status: open unless marked otherwise. Candidates for one pull request.
 - **Emulator:** answers only G7SensorKit's messages, so the real Dexcom app connects, gets the certificates and never
   finishes ("Searching for sensor", 11-23 20:09).
 
-### 11. Pairing-tail bytes differ
+### 11. Pairing-tail bytes differ (mostly fixed, e1434a6)
+
+- **Fix:** `05 01 02`, `06 00` and `08 01` (only once bonded) are now sent. The `0A 00 0N` round acknowledgements
+  are not, because their order against the J-PAKE payloads is not established.
 
 - **Real G7:** verdict for a new key `05 01 02`; reply to the keep-alive `06 00`; confirmation `08 01`, sent only once
   the link is encrypted; each key-exchange round acknowledged with `0A 00 0N`.
@@ -136,7 +145,7 @@ Status: open unless marked otherwise. Candidates for one pull request.
 
 ## Tooling (not gaps)
 
-- `POST /new` hung once in `radio.Stop()` (11-24 15:36), and its re-exec drops `-dexcom-app` and `-interval`. Workaround: stop the
-  service, move `g7state.json` aside, put fresh-sensor flags in `~/g7sim/fresh-args` (one-shot, read by `g7svc.sh`),
-  start the service.
+- `POST /new` hung once in `radio.Stop()` (11-24 15:36). Workaround: stop the service, move `g7state.json` aside,
+  put fresh-sensor flags in `~/g7sim/fresh-args` (one-shot, read by `g7svc.sh`), start the service. Its re-exec now
+  keeps `-dexcom-app`, `-interval` and `-bond` (e1434a6).
 - Noted 11-23: the binary deployed on 11-07 (`4220ed2a` plus uncommitted edits) had no source on record; `0d69447` (11-07 13:33) may be it. Check before building on it.
