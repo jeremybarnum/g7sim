@@ -85,6 +85,11 @@ type Slot struct {
 	Key      []byte    `json:"key"`
 	LastSeen time.Time `json:"lastSeen"`
 	Misses   int       `json:"misses"`
+	// Unbonded is a key whose display has no Bluetooth bond with the sensor: its pairing ended
+	// before the display's system paired, or the display forgot the sensor in its Bluetooth
+	// settings. The key still authenticates (verdict 05 01 02) but the sensor serves no glucose
+	// until the display bonds. A state file from before this field reads as bonded.
+	Unbonded bool `json:"unbonded,omitempty"`
 }
 
 type Calibration struct {
@@ -116,6 +121,9 @@ type Sensor struct {
 	lockedUntil time.Time
 	addrTypes   map[string]byte // display type each address last authenticated as
 	muted       map[byte]bool   // display types refused every reading, as if out of range; not saved
+
+	bondMode    BondMode
+	bondPending map[byte]*bondRequest // display types whose system is showing the Pair prompt
 }
 
 func NewSensor(state *State, path string, timing Timing) *Sensor {
@@ -123,12 +131,13 @@ func NewSensor(state *State, path string, timing Timing) *Sensor {
 		state.Identity = NewSensorIdentity(state.Serial)
 	}
 	s := &Sensor{
-		Timing:    timing,
-		state:     state,
-		path:      path,
-		glucose:   NewGlucoseModel(state),
-		addrTypes: map[string]byte{},
-		muted:     map[byte]bool{},
+		Timing:      timing,
+		state:       state,
+		path:        path,
+		glucose:     NewGlucoseModel(state),
+		addrTypes:   map[string]byte{},
+		muted:       map[byte]bool{},
+		bondPending: map[byte]*bondRequest{},
 	}
 	s.fillReadings(time.Now())
 	return s
@@ -400,7 +409,7 @@ type AuthVerdict struct{ Status, Detail byte }
 
 var (
 	verdictBonded         = AuthVerdict{0x01, 0x01}
-	verdictPaired         = AuthVerdict{0x01, 0x00}
+	verdictNotBonded      = AuthVerdict{0x01, 0x02} // authenticated, no Bluetooth bond
 	verdictMismatch       = AuthVerdict{0x02, 0x01}
 	verdictTypeRestricted = AuthVerdict{0x02, 0x02}
 	verdictNoAppKey       = AuthVerdict{0x02, 0x03}
@@ -415,17 +424,21 @@ func (s *Sensor) Authenticated(addr string, displayType byte, newKey []byte, now
 	if newKey != nil {
 		// A completed key exchange means the client has the pairing code and
 		// physical possession, so it takes the slot, replacing any earlier
-		// key for this display type.
-		s.state.Slots[displayType] = &Slot{Key: newKey, LastSeen: now}
+		// key for this display type. A new key has no bond yet: a real G7
+		// answers 05 01 02 and the display's system pairs at the bond request.
+		s.state.Slots[displayType] = &Slot{Key: newKey, LastSeen: now, Unbonded: true}
 		s.rejections = 0
 		s.save()
-		return verdictPaired
+		return verdictNotBonded
 	}
 	if slot == nil {
 		return s.reject(verdictNoAppKey, now)
 	}
 	slot.LastSeen = now
 	s.rejections = 0
+	if slot.Unbonded {
+		return verdictNotBonded
+	}
 	return verdictBonded
 }
 
@@ -526,6 +539,7 @@ func (s *Sensor) Status() map[string]interface{} {
 	for t, slot := range s.state.Slots {
 		slots[fmt.Sprint(t)] = map[string]interface{}{
 			"lastSeen": slot.LastSeen, "held": s.isHeld(slot, now), "misses": slot.Misses,
+			"bonded": !slot.Unbonded,
 		}
 	}
 	out := map[string]interface{}{
@@ -533,7 +547,8 @@ func (s *Sensor) Status() map[string]interface{} {
 		"model": s.Model(), "days": s.state.Days,
 		"lifetimeHours": s.state.Lifetime().Hours(), "warmupMinutes": s.state.Warmup.Minutes(),
 		"activation": s.state.Activation, "slots": slots, "muted": s.mutedTypes(),
-		"glucoseMode": s.glucose.Describe(),
+		"glucoseMode": s.glucose.Describe(), "bondMode": s.bondMode.String(),
+		"bondPending": s.pendingBonds(now),
 	}
 	if r := s.state.latest(); r != nil {
 		out["latest"] = r

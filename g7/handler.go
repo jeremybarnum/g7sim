@@ -118,14 +118,20 @@ func (h *handler) protocol() {
 		if !ok {
 			return
 		}
-		if !h.challenge(challenge, true) {
+		if _, ok := h.challenge(challenge, true); !ok {
 			return
 		}
 		if !h.certificatePhase() || !h.keyChallenge() || !h.finalize() {
 			return
 		}
 	case opAuthChallengeTx: // a reconnect opens straight with the challenge
-		if !h.challenge(first, false) {
+		bonded, ok := h.challenge(first, false)
+		if !ok {
+			return
+		}
+		// A key with no bond (05 01 02): the display runs the certificate phase and asks to
+		// bond again, as G7SensorKit does after a bond was lost.
+		if !bonded && (!h.certificatePhase() || !h.keyChallenge() || !h.finalize()) {
 			return
 		}
 	default:
@@ -192,17 +198,19 @@ func (h *handler) keyExchange(first []byte) bool {
 
 // MARK: - AES challenge
 
-func (h *handler) challenge(msg []byte, fresh bool) bool {
+// challenge runs the AES challenge and reports whether the client's key was accepted, and
+// whether its display is bonded.
+func (h *handler) challenge(msg []byte, fresh bool) (bonded, ok bool) {
 	if len(msg) < 10 || msg[0] != opAuthChallengeTx {
 		log.Printf("%s: malformed challenge %x", h.link.Addr(), msg)
-		return false
+		return false, false
 	}
 	clientChallenge := msg[1:9]
 	h.displayType = msg[9]
 	now := time.Now()
 
 	if !h.sensor.AdmitDisplay(h.link.Addr(), h.displayType, now, h.mode) {
-		return false
+		return false, false
 	}
 
 	var key, newKey []byte
@@ -227,31 +235,32 @@ func (h *handler) challenge(msg []byte, fresh bool) bool {
 	h.link.Notify(CharAuth, resp)
 	if key == nil {
 		log.Printf("%s: no key for display type %d; client will re-pair", h.link.Addr(), h.displayType)
-		return false
+		return false, false
 	}
 
-	answer, ok := h.waitAuth(handshakeTimeout)
-	if !ok {
-		return false
+	answer, got := h.waitAuth(handshakeTimeout)
+	if !got {
+		return false, false
 	}
 	if len(answer) < 9 || answer[0] != opAuthAnswer {
-		return false
+		return false, false
 	}
 	if !bytes.Equal(answer[1:9], EncryptChallenge(sensorChallenge, key)) {
 		v := h.sensor.Rejected(verdictMismatch)
 		h.link.Notify(CharAuth, []byte{opAuthStatus, v.Status, v.Detail})
 		log.Printf("%s: challenge answer did not match", h.link.Addr())
-		return false
+		return false, false
 	}
 
 	v := h.sensor.Authenticated(h.link.Addr(), h.displayType, newKey, now)
 	h.link.Notify(CharAuth, []byte{opAuthStatus, v.Status, v.Detail})
 	if v.Status != 0x01 {
 		log.Printf("%s: refused (status %02x detail %02x)", h.link.Addr(), v.Status, v.Detail)
-		return false
+		return false, false
 	}
-	log.Printf("%s: authenticated as display type %d", h.link.Addr(), h.displayType)
-	return true
+	bonded = v == verdictBonded
+	log.Printf("%s: authenticated as display type %d (bonded: %v)", h.link.Addr(), h.displayType, bonded)
+	return bonded, true
 }
 
 // MARK: - Certificate exchange (fresh pairing only)
@@ -337,17 +346,16 @@ func (h *handler) finalize() bool {
 	if !ok || len(msg) == 0 || msg[0] != opFinalize {
 		return false
 	}
-	h.link.Notify(CharAuth, []byte{opFinalize, 0x1E})
+	h.link.Notify(CharAuth, []byte{opFinalize, 0x00})
 
 	msg, ok = h.waitAuth(handshakeTimeout)
 	if !ok || len(msg) == 0 || msg[0] != opBondRequest {
 		return false
 	}
 	h.link.Notify(CharAuth, []byte{opBondRequest, 0x00})
-	// The sensor confirms the bond; the client treats this as optional.
-	h.link.Notify(CharAuth, []byte{opBondConfirmed, 0x00})
-	log.Printf("%s: paired", h.link.Addr())
-	return true
+	log.Printf("%s: paired; bond requested", h.link.Addr())
+	// A real G7 sends its Bluetooth security request now and 08 01 once the link is encrypted.
+	return h.bond()
 }
 
 // MARK: - Session

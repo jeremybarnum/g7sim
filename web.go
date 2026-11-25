@@ -113,8 +113,12 @@ const indexHTML = `<!doctype html>
 
   <div class="card">
     <h2>Display slots</h2>
-    <table><thead><tr><th>Type</th><th>Held</th><th>Last seen</th><th>Misses</th><th>Muted</th></tr></thead>
-    <tbody id="slots"><tr><td colspan="5" class="muted">none yet</td></tr></tbody></table>
+    <table><thead><tr><th>Type</th><th>Held</th><th>Last seen</th><th>Misses</th><th>Muted</th><th>Bonded</th></tr></thead>
+    <tbody id="slots"><tr><td colspan="6" class="muted">none yet</td></tr></tbody></table>
+    <div style="margin-top:14px">Bluetooth bond at pairing:
+      <select id="bondMode"><option value="off">bonds at once</option><option value="refuse">refused (app not in front)</option><option value="ask">ask: wait for Pair</option></select></div>
+    <div id="bondPending" style="margin-top:8px"></div>
+    <div class="muted" style="margin-top:6px">A real G7 serves no glucose until the display's system pairs. Refused: the sensor hangs up 0.2 s after its bond request. Ask: the link is held 31 s for Pair, as a person must tap it on the device.</div>
     <div style="margin-top:14px"><button id="muteWatch">Mute the watch</button></div>
     <div class="muted" style="margin-top:6px">A muted display is refused every reading, as if out of range; the others still collect. Ends when unmuted or the emulator restarts.</div>
     <div style="margin-top:14px"><button class="danger" id="forget">Forget all keys</button></div>
@@ -197,6 +201,8 @@ async function applyGlucose(){
 document.getElementById('applyGlucose').onclick = applyGlucose;
 document.getElementById('algostate').onchange = ()=>{ touched=true; updateApply(); };
 document.getElementById('forget').onclick = async()=>{ await fetch('/forget',{method:'POST'}); refresh(); };
+const postBond = async body=>{ await fetch('/bond',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); refresh(); };
+document.getElementById('bondMode').onchange = e=>postBond({mode:e.target.value});
 document.getElementById('muteWatch').onclick = async()=>{
   await fetch('/mute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({displayType:3,muted:!watchMuted})}); refresh(); };
 
@@ -233,8 +239,12 @@ async function refresh(){
   document.getElementById('muteWatch').textContent = watchMuted ? 'Unmute the watch' : 'Mute the watch';
   const tb = document.getElementById('slots'); const keys = Object.keys(s.slots||{});
   tb.innerHTML = keys.length ? keys.map(k=>{const sl=s.slots[k];
-    return '<tr><td>'+(TYPE[k]||k)+'</td><td>'+(sl.held?'yes':'no')+'</td><td>'+ago(sl.lastSeen)+'</td><td>'+sl.misses+'</td><td>'+(muted.includes(+k)?'yes':'no')+'</td></tr>';}).join('')
-    : '<tr><td colspan="5" class="muted">none yet</td></tr>';
+    return '<tr><td>'+(TYPE[k]||k)+'</td><td>'+(sl.held?'yes':'no')+'</td><td>'+ago(sl.lastSeen)+'</td><td>'+sl.misses+'</td><td>'+(muted.includes(+k)?'yes':'no')+'</td>'
+      +'<td>'+(sl.bonded?'yes <button onclick="postBond({forget:'+k+'})">Forget bond</button>':'no')+'</td></tr>';}).join('')
+    : '<tr><td colspan="6" class="muted">none yet</td></tr>';
+  const bm = document.getElementById('bondMode'); if(document.activeElement!==bm) bm.value = s.bondMode||'off';
+  document.getElementById('bondPending').innerHTML = (s.bondPending||[]).map(p=>
+    '<button onclick="postBond({accept:'+p.displayType+'})">Pair on the '+(TYPE[p.displayType]||p.displayType)+'</button> <span class="muted">'+p.secondsLeft+' s left</span>').join(' ');
 }
 const PRESET = {10:{lifetime:240, warmup:27}, 15:{lifetime:360, warmup:62}};
 const field = id=>document.getElementById(id);

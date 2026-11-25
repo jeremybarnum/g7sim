@@ -109,9 +109,14 @@ func main() {
 	simulator := flag.String("simulator", "", "the app's simulator (name or UDID), for -relaunch and -suspend")
 	relaunch := flag.Bool("relaunch", false, "relaunch a terminated app for its lodged connect, as iOS does")
 	suspendApp := flag.Bool("suspend", false, "stop the app while iOS would have it suspended, waking it for Bluetooth events")
+	bond := flag.String("bond", "off", "the display's Bluetooth bond at the end of a pairing: off (bonds at once), refuse (its system refuses, as an iPhone or Apple Watch with the app not in front: hang up, no glucose) or ask (hold the link up to 31 s for Pair from the API or web page). The mode can be changed at run time")
 	dylib := flag.String("dylib", "", "ImpossiBLE library injected into a relaunched app (default: simulator/build/libImpossiBLE.dylib beside g7sim)")
 	flag.Parse()
 	g7.DexcomApp = *dexcomApp
+	bondMode, err := g7.ParseBondMode(*bond)
+	if err != nil {
+		log.Fatal(err)
+	}
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	rand.Seed(time.Now().UnixNano())
 
@@ -155,6 +160,10 @@ func main() {
 		log.Printf("readings every %v", *interval)
 	}
 	sensor := g7.NewSensor(state, *statePath, timing)
+	sensor.SetBondMode(bondMode)
+	if bondMode != g7.BondInstant {
+		log.Printf("Bluetooth bond: %s", bondMode)
+	}
 	log.Printf("%s (%s, %d-day preset, lifetime %v, warmup %v) serial %d pairing code %s, activated %s",
 		sensor.Name(), sensor.Model(), state.Days, state.Lifetime(), state.Warmup,
 		sensor.Serial(), sensor.PairingCode(), state.Activation.Format(time.RFC3339))
@@ -203,7 +212,11 @@ func main() {
 		log.Printf("restarting as the new sensor")
 		args := []string{exe, "-state", *statePath, "-api", *api, "-max-connections", strconv.Itoa(*maxConn),
 			"-transport", *transport, "-socket", *socket, "-simulator", *simulator,
-			"-relaunch=" + strconv.FormatBool(*relaunch), "-suspend=" + strconv.FormatBool(*suspendApp), "-dylib", *dylib}
+			"-relaunch=" + strconv.FormatBool(*relaunch), "-suspend=" + strconv.FormatBool(*suspendApp), "-dylib", *dylib,
+			"-dexcom-app=" + strconv.FormatBool(*dexcomApp), "-bond", sensor.BondMode().String()}
+		if *interval > 0 {
+			args = append(args, "-interval", interval.String())
+		}
 		log.Fatalf("restarting: %v", syscall.Exec(exe, args, os.Environ()))
 	}
 

@@ -20,6 +20,10 @@ import (
 //	POST /mute     {"displayType":3,"muted":true}
 //	               refuse one display type (2 phone, 3 watch) every reading until
 //	               unmuted or restarted
+//	POST /bond     {"mode":"ask"}   the display's Bluetooth bond: off, refuse or ask
+//	               {"accept":3}     tap Pair on that display's prompt (0: any showing)
+//	               {"forget":3}     that display forgets the sensor in its Bluetooth
+//	                                settings: it must bond again before it gets glucose
 //	POST /force-quit             (-transport impossible) the app's end is a force-quit:
 //	                             drop what it left lodged instead of relaunching it
 //	POST /new      {"model":"stelo","days":15,"code":"1234","serial":0,
@@ -76,6 +80,46 @@ func serveAPI(addr string, sensor *g7.Sensor, replace func(*g7.State)) {
 		}
 		sensor.SetMuted(m.DisplayType, m.Muted)
 		log.Printf("display type %d muted: %v", m.DisplayType, m.Muted)
+		writeJSON(w, sensor.Status())
+	})
+	http.HandleFunc("/bond", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST a bond mode, an accept or a forget", http.StatusMethodNotAllowed)
+			return
+		}
+		var m struct {
+			Mode   string `json:"mode"`
+			Accept *byte  `json:"accept"`
+			Forget *byte  `json:"forget"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+			http.Error(w, "bad bond request", http.StatusBadRequest)
+			return
+		}
+		if m.Mode != "" {
+			mode, err := g7.ParseBondMode(m.Mode)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			sensor.SetBondMode(mode)
+			log.Printf("Bluetooth bond now %s", mode)
+		}
+		if m.Accept != nil {
+			accepted := sensor.AcceptBond(*m.Accept)
+			if len(accepted) == 0 {
+				http.Error(w, "no Pair prompt is showing", http.StatusConflict)
+				return
+			}
+			log.Printf("Pair tapped for display types %v", accepted)
+		}
+		if m.Forget != nil {
+			if !sensor.ForgetBond(*m.Forget) {
+				http.Error(w, "that display type holds no key", http.StatusNotFound)
+				return
+			}
+			log.Printf("display type %d forgot its bond", *m.Forget)
+		}
 		writeJSON(w, sensor.Status())
 	})
 	http.HandleFunc("/new", func(w http.ResponseWriter, r *http.Request) {
