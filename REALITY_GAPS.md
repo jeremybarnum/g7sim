@@ -13,14 +13,16 @@ Status: open unless marked otherwise. Candidates for one pull request.
 - **Real G7:** after a display completes the key exchange with the pairing code, the sensor answers `bond=2` and, at
   the end of the handshake, sends a Bluetooth security request (just-works pairing). If the display's system doesn't
   complete the bond, the sensor drops the link and refuses the display's new key at the next connection, so the
-  display must pair again. On an Apple Watch the system shows a pairing prompt only while the app is in front with
-  the screen lit; otherwise it ignores the request ("no sessions that support it", error 4815).
+  display must pair again. On an Apple Watch the system takes the request only while the app is in front: it then
+  shows a "Just Works" pairing prompt, and the bond completes when the person taps Pair (unanswered, it fails after
+  about 30 s with error 719). With the app in the background it ignores the request ("no sessions that support it",
+  error 4815).
 - **Emulator:** answers `bond=0` (`verdictPaired = {0x01, 0x00}` in `g7/sensor.go`), and `finalize()` in
   `g7/handler.go` replies to the bond request with an in-protocol "bond confirmed" and logs "paired". It never sends
   a Bluetooth security request and keeps the key whatever happens.
-- **Seen:** 11-24, real sensor DXCMuz, Jeremy's watch: six first contacts in the background and one with Loop in
-  front but the screen off all failed this way; the one with the screen on got the prompt, was accepted, and bonded
-  (22:01:13). Watch app log and watch sysdiagnoses (bluetoothd), `~/Documents/LoopSysDiagnose/2026-11-24-real-g7-dexcom-pairing`.
+- **Seen:** 11-24, real sensor DXCMuz, Jeremy's watch: six first contacts in the background were ignored; at 21:26
+  (Loop in front, screen off) the prompt was shown but nobody saw it and it timed out; at 22:01 (screen on) it was
+  accepted and bonded (22:01:13). Watch app log and watch sysdiagnoses (bluetoothd), `~/Documents/LoopSysDiagnose/2026-11-24-real-g7-dexcom-pairing`.
 - **Hid:** every emulator run showed the watch's first contact succeeding from behind the clock (11-23, 11-24), which
   led to wait screens that tell the user nothing is needed.
 - **Fix, cheap:** a switch that answers `bond=2` and then behaves like a sensor whose bond never completed (drop the
