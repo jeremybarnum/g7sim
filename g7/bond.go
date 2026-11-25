@@ -28,7 +28,8 @@ import (
 //
 // This emulator has no Bluetooth pairing layer, so it plays the display's system's part:
 // BondInstant bonds at once (unattended test runs), BondRefuse is the system refusing, and
-// BondAsk holds the link for an operator's Pair, as a person must tap it on the device.
+// BondAsk holds the link for an operator's Pair, as a person must tap it on the device. A
+// client can also hold its own bond request until its app is in front (see finalize).
 
 type BondMode int
 
@@ -57,10 +58,9 @@ func ParseBondMode(s string) (BondMode, error) {
 	return 0, fmt.Errorf("bond mode %q: want off, refuse or ask", s)
 }
 
-var (
-	bondRefuseHangUp = 200 * time.Millisecond // the sensor hangs up after a refused security request
-	bondPromptLimit  = 31 * time.Second       // and after an unanswered Pair prompt
-)
+// The sensor hangs up 0.2 s after a refused security request. An unanswered Pair prompt lasts as
+// long as the display's keep-alive holds the link (about 31 s after 06 1E).
+var bondRefuseHangUp = 200 * time.Millisecond
 
 type bondRequest struct {
 	addr     string
@@ -106,10 +106,10 @@ func (s *Sensor) ForgetBond(displayType byte) bool {
 
 // requestBond shows the display's Pair prompt until the deadline. The channel closes when an
 // operator accepts it.
-func (s *Sensor) requestBond(addr string, displayType byte, now time.Time) *bondRequest {
+func (s *Sensor) requestBond(addr string, displayType byte, deadline time.Time) *bondRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r := &bondRequest{addr: addr, deadline: now.Add(bondPromptLimit), accepted: make(chan struct{})}
+	r := &bondRequest{addr: addr, deadline: deadline, accepted: make(chan struct{})}
 	s.bondPending[displayType] = r
 	return r
 }
@@ -172,10 +172,10 @@ func (h *handler) bond() bool {
 		return false
 
 	case BondAsk:
-		r := h.sensor.requestBond(h.link.Addr(), h.displayType, time.Now())
+		r := h.sensor.requestBond(h.link.Addr(), h.displayType, h.holdUntil)
 		defer h.sensor.endBondRequest(h.displayType, r)
-		log.Printf("%s: display type %d's system shows the Pair prompt; waiting up to %v for Pair (POST /bond {\"accept\":%d})",
-			h.link.Addr(), h.displayType, bondPromptLimit, h.displayType)
+		log.Printf("%s: display type %d's system shows the Pair prompt; waiting %v for Pair (POST /bond {\"accept\":%d})",
+			h.link.Addr(), h.displayType, time.Until(h.holdUntil).Round(time.Second), h.displayType)
 		select {
 		case <-r.accepted:
 			log.Printf("%s: Pair tapped on display type %d", h.link.Addr(), h.displayType)

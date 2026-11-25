@@ -34,6 +34,10 @@ func expectSilence(t *testing.T, link *fakeLink, d time.Duration) {
 
 // finalizeWith runs the finalize step against the given bond mode with a new, unbonded watch key.
 func finalizeWith(t *testing.T, mode BondMode) (*Sensor, *fakeLink, *handler, chan bool) {
+	return finalizeHolding(t, mode, 0x1E)
+}
+
+func finalizeHolding(t *testing.T, mode BondMode, keepAlive byte) (*Sensor, *fakeLink, *handler, chan bool) {
 	s, _ := newTestSensor(t)
 	s.SetBondMode(mode)
 	s.state.Slots[DisplayWatch] = &Slot{Key: make([]byte, 16), LastSeen: time.Now(), Unbonded: true}
@@ -41,11 +45,17 @@ func finalizeWith(t *testing.T, mode BondMode) (*Sensor, *fakeLink, *handler, ch
 	h := bareHandler(s, link, DisplayWatch)
 	result := make(chan bool, 1)
 	go func() { result <- h.finalize() }()
-	h.in <- inMsg{char: CharAuth, data: []byte{opFinalize, 0x1E}}
+	h.in <- inMsg{char: CharAuth, data: []byte{opFinalize, keepAlive}}
 	expectNotify(t, link, CharAuth, []byte{opFinalize, 0x00})
 	h.in <- inMsg{char: CharAuth, data: []byte{opBondRequest}}
 	expectNotify(t, link, CharAuth, []byte{opBondRequest, 0x00})
 	return s, link, h, result
+}
+
+func shortGrace(t *testing.T) {
+	saved := keepAliveGrace
+	keepAliveGrace = 100 * time.Millisecond
+	t.Cleanup(func() { keepAliveGrace = saved })
 }
 
 func bonded(s *Sensor, t byte) bool {
@@ -101,16 +111,14 @@ func TestBondAskWaitsForPair(t *testing.T) {
 }
 
 func TestBondAskUnansweredHangsUp(t *testing.T) {
-	saved := bondPromptLimit
-	bondPromptLimit = 200 * time.Millisecond
-	defer func() { bondPromptLimit = saved }()
-	s, link, _, result := finalizeWith(t, BondAsk)
+	shortGrace(t)
+	s, link, _, result := finalizeHolding(t, BondAsk, 0x01) // a 1 s keep-alive
 	select {
 	case ok := <-result:
 		if ok {
 			t.Fatal("unanswered prompt reported as bonded")
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("the sensor did not hang up")
 	}
 	expectSilence(t, link, 50*time.Millisecond)
@@ -190,6 +198,65 @@ func TestReconnectWithoutBondBondsAgainThenServes(t *testing.T) {
 	}
 	if !bonded(s, DisplayWatch) {
 		t.Fatal("not bonded")
+	}
+}
+
+// Dexcom's watch app: a long keep-alive, an idle link while the person is asked, then a second
+// keep-alive and the bond request once the app is in front.
+func TestKeepAliveHoldsTheLinkUntilALaterBondRequest(t *testing.T) {
+	s, _ := newTestSensor(t)
+	s.SetBondMode(BondAsk)
+	s.state.Slots[DisplayWatch] = &Slot{Key: make([]byte, 16), LastSeen: time.Now(), Unbonded: true}
+	link := newFakeLink()
+	h := bareHandler(s, link, DisplayWatch)
+	result := make(chan bool, 1)
+	go func() { result <- h.finalize() }()
+
+	h.in <- inMsg{char: CharAuth, data: []byte{opFinalize, 0xFA}}
+	expectNotify(t, link, CharAuth, []byte{opFinalize, 0x00})
+	if left := time.Until(h.holdUntil); left < 249*time.Second || left > 252*time.Second {
+		t.Fatalf("06 FA holds the link %v, want about 250 s", left)
+	}
+	expectSilence(t, link, 1500*time.Millisecond) // idle, and the link stays up
+	select {
+	case <-result:
+		t.Fatal("the sensor hung up during the keep-alive")
+	default:
+	}
+
+	h.in <- inMsg{char: CharAuth, data: []byte{opFinalize, 0x1E}}
+	expectNotify(t, link, CharAuth, []byte{opFinalize, 0x00})
+	if left := time.Until(h.holdUntil); left > 32*time.Second {
+		t.Fatalf("06 1E holds the link %v, want about 30 s", left)
+	}
+	h.in <- inMsg{char: CharAuth, data: []byte{opBondRequest}}
+	expectNotify(t, link, CharAuth, []byte{opBondRequest, 0x00})
+	if got := s.AcceptBond(DisplayWatch); len(got) != 1 {
+		t.Fatalf("accepted %v", got)
+	}
+	expectNotify(t, link, CharAuth, []byte{opBondConfirmed, 0x01})
+	if !<-result || !bonded(s, DisplayWatch) {
+		t.Fatal("not bonded")
+	}
+}
+
+// The keep-alive runs out with no bond request: the sensor hangs up.
+func TestKeepAliveRunsOutWithoutABondRequest(t *testing.T) {
+	shortGrace(t)
+	s, _ := newTestSensor(t)
+	link := newFakeLink()
+	h := bareHandler(s, link, DisplayWatch)
+	result := make(chan bool, 1)
+	go func() { result <- h.finalize() }()
+	h.in <- inMsg{char: CharAuth, data: []byte{opFinalize, 0x01}}
+	expectNotify(t, link, CharAuth, []byte{opFinalize, 0x00})
+	select {
+	case ok := <-result:
+		if ok {
+			t.Fatal("reported as bonded")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the sensor did not hang up")
 	}
 }
 

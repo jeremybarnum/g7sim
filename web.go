@@ -118,7 +118,7 @@ const indexHTML = `<!doctype html>
     <div style="margin-top:14px">Bluetooth bond at pairing:
       <select id="bondMode"><option value="off">bonds at once</option><option value="refuse">refused (app not in front)</option><option value="ask">ask: wait for Pair</option></select></div>
     <div id="bondPending" style="margin-top:8px"></div>
-    <div class="muted" style="margin-top:6px">A real G7 serves no glucose until the display's system pairs. Refused: the sensor hangs up 0.2 s after its bond request. Ask: the link is held 31 s for Pair, as a person must tap it on the device.</div>
+    <div class="muted" style="margin-top:6px">A real G7 serves no glucose until the display's system pairs. Refused: the sensor hangs up 0.2 s after its bond request. Ask: the link is held for Pair as long as the display's keep-alive says (about 31 s after 06 1E), as a person must tap it on the device.</div>
     <div style="margin-top:14px"><button id="muteWatch">Mute the watch</button></div>
     <div class="muted" style="margin-top:6px">A muted display is refused every reading, as if out of range; the others still collect. Ends when unmuted or the emulator restarts.</div>
     <div style="margin-top:14px"><button class="danger" id="forget">Forget all keys</button></div>

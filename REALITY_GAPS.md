@@ -48,12 +48,25 @@ Status: open unless marked otherwise. Candidates for one pull request.
   10-23 (the "Sensor Pairing Not Finished" alert).
 - **Fixed (e1434a6), as a setting:** `-bond off|refuse|ask`, `POST /bond`, and a control in the web page's
   "Display slots" card. Default *off* bonds at once, so unattended pairings in the test rig keep working. *refuse*
-  hangs up 0.2 s after `07 00` and serves nothing (the app not in front). *ask* holds the link 31 s for Pair from the
-  API or the page, then sends `08 01` and serves. Every new key now gets `05 01 02`; an unbonded key is kept and gets
+  hangs up 0.2 s after `07 00` and serves nothing (the app not in front). *ask* holds the link for Pair from the
+  API or the page (about 31 s after `06 1E`), then sends `08 01` and serves. Every new key now gets `05 01 02`; an unbonded key is kept and gets
   `05 01 02` at the next connection, and the display bonds again. "Forget bond" plays a display forgetting the
   sensor in its Bluetooth settings. Still open: the key-discard rule (here a key never lapses), one-minute
   connections for an unbonded display (gap 13), and two levels not built: *request* (Pi only: a real security
   request, the real device decides) and *full* (real LE Secure Connections pairing in the emulator's stack).
+
+### 1a. The keep-alive and a held bond request (fixed)
+
+- **Real G7:** the display may write the keep-alive more than once and ask to bond later. Dexcom's watch app, woken
+  in the background by a new sensor (11-25, DXCMuz, watch packet log), got `05 01 02`, posted its own notification
+  ("G7 is ready to pair with your Watch. Tap to open app, then tap Pair."), wrote `06 FA` (answered `06 00`) and
+  sent no bond request. The link stayed up with no traffic for 34 s while the app was suspended. On the tap it
+  wrote `06 1E`, then `07`; the system showed the Pair prompt for the app in front, and `08 01` followed the Pair.
+  Inferred, not proven: the byte after `06` is the seconds the sensor holds the link (0x1E = 30, 0xFA = 250), which
+  fits the 11-24 prompts that ended about 31 s after `06 1E`.
+- **Emulator before:** waited a fixed 65 s for the bond request and dropped the link at a second keep-alive.
+- **Fix:** any number of keep-alives before the bond request; the link is held for the seconds the last one named
+  (30 if none), plus 1 s, for the bond request and, in *ask* mode, for Pair.
 
 ### 2. Dexcom-app mode: no answer to the key-challenge nonce
 

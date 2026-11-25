@@ -19,7 +19,11 @@ const (
 	handshakeTimeout = 65 * time.Second // outlasts the client's own 60 s pairing deadline
 	sessionIdle      = 6 * time.Second  // close once the client stops asking
 	certMTU          = 20               // the certificate characteristic streams in 20-byte chunks
+	defaultKeepAlive = 30 * time.Second // a keep-alive that names no time
 )
+
+// keepAliveGrace is how long past the keep-alive the sensor hangs up (about 1 s on 11-24).
+var keepAliveGrace = time.Second
 
 // DexcomApp has a simulated Dexcom app share each link, as the Dexcom app on a phone or a
 // watch does: a client that does not authenticate itself (stock G7SensorKit, which only
@@ -59,6 +63,7 @@ type handler struct {
 	displayType byte
 	served      bool
 	subscribed  map[Char]bool // the characteristics the client listens to
+	holdUntil   time.Time     // how long the display's last keep-alive holds the link
 }
 
 func newHandler(sensor *Sensor, link Link, mode AdvertMode) Handler {
@@ -342,21 +347,50 @@ func (h *handler) keyChallenge() bool {
 
 // MARK: - Finalize
 
+// finalize answers the display's keep-alive (06 xx) and its bond request (07).
+//
+// The display may write the keep-alive more than once before it asks to bond: Dexcom's watch
+// app, woken in the background by a new sensor, writes 06 FA, posts a notification asking the
+// person to open the app, and leaves the link idle (34 s in the 11-25 capture) until the tap;
+// then it writes 06 1E and 07 with the app in front, where the system shows its Pair prompt.
+// G7SensorKit writes 06 1E and 07 at once.
+//
+// The byte after 06 is taken as the seconds the sensor holds the link (0x1E = 30, 0xFA = 250).
+// That is inferred, not proven: it fits the idle link above and the 11-24 captures, where an
+// unanswered Pair prompt after 06 1E ended about 31 s later.
 func (h *handler) finalize() bool {
-	msg, ok := h.waitAuth(handshakeTimeout)
-	if !ok || len(msg) == 0 || msg[0] != opFinalize {
-		return false
+	wait := handshakeTimeout
+	for {
+		msg, ok := h.waitAuth(wait)
+		if !ok || len(msg) == 0 {
+			if h.holdUntil != (time.Time{}) && !h.gone() {
+				log.Printf("%s: no bond request before the keep-alive ran out; hanging up", h.link.Addr())
+			}
+			return false
+		}
+		switch msg[0] {
+		case opFinalize:
+			hold := defaultKeepAlive
+			if len(msg) >= 2 && msg[1] != 0 {
+				hold = time.Duration(msg[1]) * time.Second
+			}
+			h.holdUntil = time.Now().Add(hold + keepAliveGrace)
+			wait = hold + keepAliveGrace
+			h.link.Notify(CharAuth, []byte{opFinalize, 0x00})
+			log.Printf("%s: keep-alive %x: holding the link %v for the bond request", h.link.Addr(), msg, hold)
+		case opBondRequest:
+			if h.holdUntil == (time.Time{}) {
+				return false // a bond request with no keep-alive before it
+			}
+			h.link.Notify(CharAuth, []byte{opBondRequest, 0x00})
+			log.Printf("%s: paired; bond requested", h.link.Addr())
+			// A real G7 sends its Bluetooth security request now and 08 01 once the link is encrypted.
+			return h.bond()
+		default:
+			log.Printf("%s: expected the keep-alive or the bond request, got %x", h.link.Addr(), msg)
+			return false
+		}
 	}
-	h.link.Notify(CharAuth, []byte{opFinalize, 0x00})
-
-	msg, ok = h.waitAuth(handshakeTimeout)
-	if !ok || len(msg) == 0 || msg[0] != opBondRequest {
-		return false
-	}
-	h.link.Notify(CharAuth, []byte{opBondRequest, 0x00})
-	log.Printf("%s: paired; bond requested", h.link.Addr())
-	// A real G7 sends its Bluetooth security request now and 08 01 once the link is encrypted.
-	return h.bond()
 }
 
 // MARK: - Session
