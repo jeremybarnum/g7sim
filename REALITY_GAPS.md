@@ -22,7 +22,8 @@ Status: open unless marked otherwise. Candidates for one pull request.
   a Bluetooth security request and keeps the key whatever happens.
 - **Seen:** 11-24, real sensor DXCMuz, Jeremy's watch: six first contacts in the background were ignored; at 21:26
   (Loop in front, screen off) the prompt was shown but nobody saw it and it timed out; at 22:01 (screen on) it was
-  accepted and bonded (22:01:13). Watch app log and watch sysdiagnoses (bluetoothd), `~/Documents/LoopSysDiagnose/2026-11-24-real-g7-dexcom-pairing`.
+  accepted and bonded (22:01:13). Same in direct mode after forgetting the sensor in Bluetooth settings: background
+  failures 23:11–23:31, prompt unanswered 23:33:59, accepted and bonded 23:35:05. Watch app log and watch sysdiagnoses (bluetoothd), `~/Documents/LoopSysDiagnose/2026-11-24-real-g7-dexcom-pairing`.
 - **Hid:** every emulator run showed the watch's first contact succeeding from behind the clock (11-23, 11-24), which
   led to wait screens that tell the user nothing is needed.
 - **Fix, cheap:** a switch that answers `bond=2` and then behaves like a sensor whose bond never completed (drop the
