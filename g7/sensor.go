@@ -359,23 +359,41 @@ func (s *Sensor) LinkClosed(now time.Time) {
 	s.win.lastClose = now
 }
 
-// AdmitDisplay is the check at the client's challenge, once its display type
-// is known.
 // ObserverDisplay picks the display a client that does not authenticate rides, when its link
 // cannot say: the phone's, unless the phone's display already collected this window's reading
 // from another address, then the watch's. So a phone and a watch that both only observe (each
-// riding its own Dexcom app) both get the reading, as with a real sensor.
+// riding its own Dexcom app) both get the reading, as with a real sensor. Not the watch's when
+// a client of ours authenticated as the watch holds its key: that watch is not riding a Dexcom
+// app, so a second observer is the phone again (its address changed), and the phone's reading
+// must not be booked to the watch.
 func (s *Sensor) ObserverDisplay(addr string) byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if t, ok := s.addrTypes[addr]; ok && s.win != nil && s.win.servedAddrs[addr] {
 		return t
 	}
-	if s.win != nil && s.win.servedTypes[DisplayPhone] && !s.win.servedTypes[DisplayWatch] {
+	watchKey := s.state.Slots[DisplayWatch] != nil && s.state.Slots[DisplayWatch].Key != nil
+	if s.win != nil && s.win.servedTypes[DisplayPhone] && !s.win.servedTypes[DisplayWatch] && !watchKey {
 		return DisplayWatch
 	}
 	return DisplayPhone
 }
+
+// AppSession records the simulated Dexcom app's session for a display: the app paired with the
+// sensor, so it holds that display's slot, and the sensor settles into its grid instead of
+// advertising as never paired. Its key is the app's, not a client's: a client of ours that
+// authenticates as that display finds no key it knows and pairs with the code.
+func (s *Sensor) AppSession(displayType byte, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.Slots[displayType] == nil {
+		s.state.Slots[displayType] = &Slot{LastSeen: now}
+		s.save()
+	}
+}
+
+// AdmitDisplay is the check at the client's challenge, once its display type
+// is known.
 
 func (s *Sensor) AdmitDisplay(addr string, displayType byte, now time.Time, mode AdvertMode) bool {
 	s.mu.Lock()

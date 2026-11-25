@@ -19,7 +19,6 @@ const (
 	handshakeTimeout = 65 * time.Second // outlasts the client's own 60 s pairing deadline
 	sessionIdle      = 6 * time.Second  // close once the client stops asking
 	certMTU          = 20               // the certificate characteristic streams in 20-byte chunks
-	dexcomAppWait    = 2 * time.Second  // a client that has written nothing by then only observes
 )
 
 // DexcomApp has a simulated Dexcom app share each link, as the Dexcom app on a phone or a
@@ -97,15 +96,17 @@ func (h *handler) Subscribed(c Char) {
 func (h *handler) Closed() { close(h.done) }
 
 func (h *handler) protocol() {
-	wait := handshakeTimeout
 	if DexcomApp {
-		wait = dexcomAppWait
+		observer, ok := h.observes()
+		if !ok {
+			return
+		}
+		if observer {
+			h.observed()
+			return
+		}
 	}
-	first, ok := h.waitAuth(wait)
-	if !ok && DexcomApp && !h.gone() {
-		h.observed()
-		return
-	}
+	first, ok := h.waitAuth(handshakeTimeout)
 	if !ok || len(first) == 0 {
 		return
 	}
@@ -431,6 +432,37 @@ func (h *handler) handleControl(msg []byte) {
 
 // MARK: - The Dexcom app's session, for a client that only observes
 
+// observes tells, in Dexcom-app mode, a client that only observes the app's session from one
+// that authenticates itself. G7SensorKit authenticating listens to the certificate
+// characteristic, then the authentication one, then writes its challenge; observing, it listens
+// to the authentication characteristic alone. A real sensor needs no such test (each display
+// authenticates with its own key); this one stands in for the app sharing the link. It replaced
+// a 2 s guess that took a slow, suspended client for an observer and left its pairing
+// unanswered.
+func (h *handler) observes() (observer, ok bool) {
+	deadline := time.Now().Add(handshakeTimeout)
+	for {
+		m, got := h.readNext(time.Until(deadline))
+		if !got {
+			return false, false
+		}
+		switch {
+		case m.subscribed && m.char == CharCertificate:
+			return false, true
+		case m.subscribed && m.char == CharAuth:
+			return !h.subscribed[CharCertificate], true
+		case m.subscribed:
+		case m.char == CharAuth:
+			h.authQ = append(h.authQ, m.data)
+			return false, true
+		case m.char == CharCertificate:
+			h.certBuf = append(h.certBuf, m.data...)
+		case m.char == CharControl:
+			h.ctrlQ = append(h.ctrlQ, m.data)
+		}
+	}
+}
+
 // observed plays the Dexcom app's session on the link: its authentication shows as
 // authenticated and bonded, then its reading and the last hour's backfill arrive, and the app
 // hangs up.
@@ -458,6 +490,7 @@ func (h *handler) observed() {
 		return
 	}
 	h.link.Notify(CharControl, GlucoseMessage(r, sensorNow))
+	h.sensor.AppSession(h.displayType, now)
 	h.sensor.Served(h.link.Addr(), h.displayType, now)
 	h.served = true
 	log.Printf("%s: served reading at %d as the Dexcom app's session (display type %d)", h.link.Addr(), r.Time, h.displayType)

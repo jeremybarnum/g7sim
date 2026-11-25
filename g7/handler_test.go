@@ -199,7 +199,7 @@ func TestTheDexcomAppsSessionForAnObserver(t *testing.T) {
 	var auth capture
 	select {
 	case auth = <-link.out:
-	case <-time.After(dexcomAppWait + 2*time.Second):
+	case <-time.After(2 * time.Second):
 		t.Fatal("no authentication status")
 	}
 	if auth.char != CharAuth || !bytes.Equal(auth.data, []byte{opAuthStatus, 0x01, 0x01}) {
@@ -248,7 +248,7 @@ func TestASecondObserverInAWindowIsServedAsTheWatch(t *testing.T) {
 			if c.char != CharAuth {
 				t.Fatalf("%s: first notification %v, want the authentication status", addr, c.char)
 			}
-		case <-time.After(dexcomAppWait + 2*time.Second):
+		case <-time.After(2 * time.Second):
 			t.Fatalf("%s: no authentication status — not admitted", addr)
 		}
 		if g := link.recv(t); g.char != CharControl || g.data[0] != opGlucose {
@@ -279,11 +279,69 @@ func TestAnAuthenticatingClientIsServedAsBefore(t *testing.T) {
 
 	link := newFakeLink()
 	h := newHandler(s, link, AdvertFull)
+	h.Subscribed(CharCertificate) // as G7SensorKit authenticating does, before the authentication one
 	h.Subscribed(CharAuth)
 	msg := append([]byte{opAuthChallengeTx}, 1, 2, 3, 4, 5, 6, 7, 8)
 	h.Write(CharAuth, append(msg, DisplayPhone))
 	reply := link.recv(t)
 	if reply.char != CharAuth || reply.data[0] != opAuthChallengeRx {
 		t.Fatalf("reply %v %x, want the challenge answer", reply.char, reply.data)
+	}
+}
+
+// A slow client that authenticates (a suspended watch, 11-23) is not taken for an observer:
+// its challenge, written well after it listened, is answered.
+func TestASlowAuthenticatingClientIsNotTakenForAnObserver(t *testing.T) {
+	DexcomApp = true
+	defer func() { DexcomApp = false }()
+	s, _ := newTestSensor(t)
+	s.state.Slots[DisplayWatch] = &Slot{Key: make([]byte, 16), LastSeen: time.Now()}
+	s.Tick(time.Now())
+
+	link := newFakeLink()
+	h := newHandler(s, link, AdvertFull)
+	h.Subscribed(CharCertificate)
+	h.Subscribed(CharAuth)
+	expectSilence(t, link, 3*time.Second)
+	msg := append([]byte{opAuthChallengeTx}, 1, 2, 3, 4, 5, 6, 7, 8)
+	h.Write(CharAuth, append(msg, DisplayWatch))
+	reply := link.recv(t)
+	if reply.char != CharAuth || reply.data[0] != opAuthChallengeRx {
+		t.Fatalf("reply %v %x, want the challenge answer", reply.char, reply.data)
+	}
+}
+
+// Over Bluetooth the phone's address can change within a window. A second observer when our own
+// watch holds the watch's key is the phone again, refused as already served, not booked to the
+// watch; and the Dexcom app's session holds the phone's slot.
+func TestASecondObserverIsNotBookedToADirectWatch(t *testing.T) {
+	DexcomApp = true
+	defer func() { DexcomApp = false }()
+	s, _ := newTestSensor(t)
+	s.state.Slots[DisplayWatch] = &Slot{Key: make([]byte, 16), LastSeen: time.Now()}
+	s.Tick(time.Now())
+
+	link := newFakeLink()
+	link.addr = "PH:ON:E1"
+	h := newHandler(s, link, AdvertFull)
+	h.Subscribed(CharAuth)
+	h.Subscribed(CharControl)
+	if c := link.recv(t); c.char != CharAuth {
+		t.Fatalf("first notification %v", c.char)
+	}
+	if g := link.recv(t); g.char != CharControl || g.data[0] != opGlucose {
+		t.Fatalf("%v %x, want the reading", g.char, g.data)
+	}
+	<-link.closed
+	if s.ObserverDisplay("PH:ON:E2") != DisplayPhone {
+		t.Fatal("second observer booked to the watch, which our own client holds")
+	}
+	if s.SlotKey(DisplayPhone) != nil {
+		t.Fatal("the app's slot has a key")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.Slots[DisplayPhone] == nil {
+		t.Fatal("the Dexcom app's session holds no phone slot")
 	}
 }
