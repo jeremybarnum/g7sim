@@ -112,7 +112,7 @@ func main() {
 	bond := flag.String("bond", "off", "the display's Bluetooth bond at the end of a pairing: off (bonds at once), refuse (its system refuses, as an iPhone or Apple Watch with the app not in front: hang up, no glucose) or ask (hold the link for Pair from the API or web page, as long as the display's keep-alive says: about 31 s after 06 1E). The mode can be changed at run time")
 	dylib := flag.String("dylib", "", "ImpossiBLE library injected into a relaunched app (default: simulator/build/libImpossiBLE.dylib beside g7sim)")
 	flag.Parse()
-	g7.DexcomApp = *dexcomApp
+	g7.DexcomApp.Store(*dexcomApp)
 	bondMode, err := g7.ParseBondMode(*bond)
 	if err != nil {
 		log.Fatal(err)
@@ -213,7 +213,7 @@ func main() {
 		args := []string{exe, "-state", *statePath, "-api", *api, "-max-connections", strconv.Itoa(*maxConn),
 			"-transport", *transport, "-socket", *socket, "-simulator", *simulator,
 			"-relaunch=" + strconv.FormatBool(*relaunch), "-suspend=" + strconv.FormatBool(*suspendApp), "-dylib", *dylib,
-			"-dexcom-app=" + strconv.FormatBool(*dexcomApp), "-bond", sensor.BondMode().String()}
+			"-dexcom-app=" + strconv.FormatBool(g7.DexcomApp.Load()), "-bond", sensor.BondMode().String()}
 		if *interval > 0 {
 			args = append(args, "-interval", interval.String())
 		}

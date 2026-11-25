@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"log"
+	"sync/atomic"
 	"time"
 )
 
@@ -29,8 +30,8 @@ var keepAliveGrace = time.Second
 // watch does: a client that does not authenticate itself (stock G7SensorKit, which only
 // observes the app's session) sees the sensor authenticated and bonded, then the reading and
 // the recent backfill the app's session brings. A client that authenticates itself is served
-// as before.
-var DexcomApp bool
+// as before. It can be switched while running; a link follows the setting it started under.
+var DexcomApp atomic.Bool
 
 // AppDisplay is implemented by a link that knows which device's Dexcom app it rides:
 // DisplayPhone or DisplayWatch. Without it, the phone's.
@@ -101,7 +102,7 @@ func (h *handler) Subscribed(c Char) {
 func (h *handler) Closed() { close(h.done) }
 
 func (h *handler) protocol() {
-	if DexcomApp {
+	if DexcomApp.Load() {
 		observer, ok := h.observes()
 		if !ok {
 			return

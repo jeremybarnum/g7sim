@@ -566,7 +566,7 @@ func (s *Sensor) Status() map[string]interface{} {
 		"lifetimeHours": s.state.Lifetime().Hours(), "warmupMinutes": s.state.Warmup.Minutes(),
 		"activation": s.state.Activation, "slots": slots, "muted": s.mutedTypes(),
 		"glucoseMode": s.glucose.Describe(), "bondMode": s.bondMode.String(),
-		"bondPending": s.pendingBonds(now),
+		"bondPending": s.pendingBonds(now), "dexcomApp": DexcomApp.Load(),
 	}
 	if r := s.state.latest(); r != nil {
 		out["latest"] = r

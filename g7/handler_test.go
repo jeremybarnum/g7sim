@@ -185,8 +185,8 @@ func TestReconnectWithForgottenSlot(t *testing.T) {
 // A client that only observes, as stock G7SensorKit does, gets the Dexcom app's session: the
 // sensor authenticated and bonded, then the reading, then backfill and its end marker.
 func TestTheDexcomAppsSessionForAnObserver(t *testing.T) {
-	DexcomApp = true
-	defer func() { DexcomApp = false }()
+	DexcomApp.Store(true)
+	defer DexcomApp.Store(false)
 	s, _ := newTestSensor(t)
 	s.Tick(time.Now())
 
@@ -232,8 +232,8 @@ func TestTheDexcomAppsSessionForAnObserver(t *testing.T) {
 // Two observers in one window, as a phone and a watch each riding their own Dexcom app: the
 // first is served as the phone, the second as the watch, and both get the reading.
 func TestASecondObserverInAWindowIsServedAsTheWatch(t *testing.T) {
-	DexcomApp = true
-	defer func() { DexcomApp = false }()
+	DexcomApp.Store(true)
+	defer DexcomApp.Store(false)
 	s, _ := newTestSensor(t)
 	s.Tick(time.Now())
 
@@ -271,8 +271,8 @@ func TestASecondObserverInAWindowIsServedAsTheWatch(t *testing.T) {
 
 // A client that authenticates itself is not mistaken for an observer.
 func TestAnAuthenticatingClientIsServedAsBefore(t *testing.T) {
-	DexcomApp = true
-	defer func() { DexcomApp = false }()
+	DexcomApp.Store(true)
+	defer DexcomApp.Store(false)
 	s, _ := newTestSensor(t)
 	s.state.Slots[DisplayPhone] = &Slot{Key: make([]byte, 16), LastSeen: time.Now()}
 	s.Tick(time.Now())
@@ -292,8 +292,8 @@ func TestAnAuthenticatingClientIsServedAsBefore(t *testing.T) {
 // A slow client that authenticates (a suspended watch, 11-23) is not taken for an observer:
 // its challenge, written well after it listened, is answered.
 func TestASlowAuthenticatingClientIsNotTakenForAnObserver(t *testing.T) {
-	DexcomApp = true
-	defer func() { DexcomApp = false }()
+	DexcomApp.Store(true)
+	defer DexcomApp.Store(false)
 	s, _ := newTestSensor(t)
 	s.state.Slots[DisplayWatch] = &Slot{Key: make([]byte, 16), LastSeen: time.Now()}
 	s.Tick(time.Now())
@@ -315,8 +315,8 @@ func TestASlowAuthenticatingClientIsNotTakenForAnObserver(t *testing.T) {
 // watch holds the watch's key is the phone again, refused as already served, not booked to the
 // watch; and the Dexcom app's session holds the phone's slot.
 func TestASecondObserverIsNotBookedToADirectWatch(t *testing.T) {
-	DexcomApp = true
-	defer func() { DexcomApp = false }()
+	DexcomApp.Store(true)
+	defer DexcomApp.Store(false)
 	s, _ := newTestSensor(t)
 	s.state.Slots[DisplayWatch] = &Slot{Key: make([]byte, 16), LastSeen: time.Now()}
 	s.Tick(time.Now())

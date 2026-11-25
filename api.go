@@ -24,6 +24,8 @@ import (
 //	               {"accept":3}     tap Pair on that display's prompt (0: any showing)
 //	               {"forget":3}     that display forgets the sensor in its Bluetooth
 //	                                settings: it must bond again before it gets glucose
+//	POST /dexcom-app {"on":true}  a simulated Dexcom app shares each link, from the next
+//	                              connection; a restart goes back to the -dexcom-app flag
 //	POST /force-quit             (-transport impossible) the app's end is a force-quit:
 //	                             drop what it left lodged instead of relaunching it
 //	POST /new      {"model":"stelo","days":15,"code":"1234","serial":0,
@@ -120,6 +122,22 @@ func serveAPI(addr string, sensor *g7.Sensor, replace func(*g7.State)) {
 			}
 			log.Printf("display type %d forgot its bond", *m.Forget)
 		}
+		writeJSON(w, sensor.Status())
+	})
+	http.HandleFunc("/dexcom-app", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST {\"on\":true} or {\"on\":false}", http.StatusMethodNotAllowed)
+			return
+		}
+		var m struct {
+			On *bool `json:"on"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&m); err != nil || m.On == nil {
+			http.Error(w, "bad Dexcom-app request", http.StatusBadRequest)
+			return
+		}
+		g7.DexcomApp.Store(*m.On)
+		log.Printf("Dexcom-app mode: %v", *m.On)
 		writeJSON(w, sensor.Status())
 	})
 	http.HandleFunc("/new", func(w http.ResponseWriter, r *http.Request) {

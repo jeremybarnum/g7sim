@@ -115,6 +115,8 @@ const indexHTML = `<!doctype html>
     <h2>Display slots</h2>
     <table><thead><tr><th>Type</th><th>Held</th><th>Last seen</th><th>Misses</th><th>Muted</th><th>Bonded</th></tr></thead>
     <tbody id="slots"><tr><td colspan="6" class="muted">none yet</td></tr></tbody></table>
+    <div style="margin-top:14px"><label><input type="checkbox" id="dexcomApp"> Dexcom-app mode</label></div>
+    <div class="muted" style="margin-top:6px">A simulated Dexcom app shares each link: a client that only listens (Loop with the Dexcom app on the phone) gets readings without the code. It tells every phone in range that a Dexcom app authenticated, so keep phones that must not adopt this sensor away. From the next connection; off again after a restart unless started with -dexcom-app.</div>
     <div style="margin-top:14px">Bluetooth bond at pairing:
       <select id="bondMode"><option value="off">bonds at once</option><option value="refuse">refused (app not in front)</option><option value="ask">ask: wait for Pair</option></select></div>
     <div id="bondPending" style="margin-top:8px"></div>
@@ -203,6 +205,7 @@ document.getElementById('algostate').onchange = ()=>{ touched=true; updateApply(
 document.getElementById('forget').onclick = async()=>{ await fetch('/forget',{method:'POST'}); refresh(); };
 const postBond = async body=>{ await fetch('/bond',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); refresh(); };
 document.getElementById('bondMode').onchange = e=>postBond({mode:e.target.value});
+document.getElementById('dexcomApp').onchange = async e=>{ await fetch('/dexcom-app',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({on:e.target.checked})}); refresh(); };
 document.getElementById('muteWatch').onclick = async()=>{
   await fetch('/mute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({displayType:3,muted:!watchMuted})}); refresh(); };
 
@@ -242,6 +245,7 @@ async function refresh(){
     return '<tr><td>'+(TYPE[k]||k)+'</td><td>'+(sl.held?'yes':'no')+'</td><td>'+ago(sl.lastSeen)+'</td><td>'+sl.misses+'</td><td>'+(muted.includes(+k)?'yes':'no')+'</td>'
       +'<td>'+(sl.bonded?'yes <button onclick="postBond({forget:'+k+'})">Forget bond</button>':'no')+'</td></tr>';}).join('')
     : '<tr><td colspan="6" class="muted">none yet</td></tr>';
+  document.getElementById('dexcomApp').checked = !!s.dexcomApp;
   const bm = document.getElementById('bondMode'); if(document.activeElement!==bm) bm.value = s.bondMode||'off';
   document.getElementById('bondPending').innerHTML = (s.bondPending||[]).map(p=>
     '<button onclick="postBond({accept:'+p.displayType+'})">Pair on the '+(TYPE[p.displayType]||p.displayType)+'</button> <span class="muted">'+p.secondsLeft+' s left</span>').join(' ');
