@@ -262,3 +262,22 @@ func TestMutedWatchFindsNothingOnceThePhoneHasItsReading(t *testing.T) {
 	s.Served("PP", DisplayPhone, at(reading, 4))
 	expectModes(t, s, reading, map[float64]AdvertMode{4.5: AdvertOff, 9: AdvertOff, 30: AdvertOff, 61: AdvertOff})
 }
+
+func TestStoppedSensorIsOffTheAir(t *testing.T) {
+	s, start := newTestSensor(t)
+	now := at(start, 1)
+	if s.Tick(now) == AdvertOff {
+		t.Fatal("an unpaired sensor should be advertising")
+	}
+	s.SetStopped(true)
+	if m := s.Tick(now); m != AdvertOff {
+		t.Fatalf("stopped sensor advertises %s", m)
+	}
+	if s.LinkOpened("AA", now, AdvertFull) {
+		t.Fatal("stopped sensor admitted a link")
+	}
+	s.SetStopped(false)
+	if s.Tick(now) == AdvertOff || !s.LinkOpened("AA", now, AdvertFull) {
+		t.Fatal("started again, the sensor should advertise and admit a link")
+	}
+}
