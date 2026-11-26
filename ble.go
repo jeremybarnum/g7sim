@@ -263,9 +263,26 @@ func (r *Radio) Stop() {
 }
 
 func (r *Radio) Run() {
+	wasStopped := false
 	for range time.Tick(50 * time.Millisecond) {
 		mode := r.sensor.Tick(time.Now())
 		types := r.sensor.TypesInUse()
+
+		// Stopped: drop the open links once; the sensor admits no new ones.
+		if stopped := r.sensor.Stopped(); stopped != wasStopped {
+			wasStopped = stopped
+			if stopped {
+				r.mu.Lock()
+				var open []*link
+				for _, l := range r.links {
+					open = append(open, l)
+				}
+				r.mu.Unlock()
+				for _, l := range open {
+					l.Close()
+				}
+			}
+		}
 
 		r.mu.Lock()
 		changed := mode != r.mode || (mode == g7.AdvertFull && types != r.types)

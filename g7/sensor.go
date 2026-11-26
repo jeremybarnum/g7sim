@@ -121,6 +121,7 @@ type Sensor struct {
 	lockedUntil time.Time
 	addrTypes   map[string]byte // display type each address last authenticated as
 	muted       map[byte]bool   // display types refused every reading, as if out of range; not saved
+	stopped     bool            // off the air: no advertising, no links; not saved
 
 	bondMode    BondMode
 	bondPending map[byte]*bondRequest // display types whose system is showing the Pair prompt
@@ -211,7 +212,7 @@ func (s *Sensor) Tick(now time.Time) AdvertMode {
 			servedAddrs: map[string]bool{},
 		}
 	}
-	if now.Before(s.lockedUntil) {
+	if s.stopped || now.Before(s.lockedUntil) {
 		return AdvertOff
 	}
 
@@ -329,7 +330,7 @@ func (s *Sensor) TypesInUse() byte {
 func (s *Sensor) LinkOpened(addr string, now time.Time, mode AdvertMode) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.win == nil {
+	if s.win == nil || s.stopped {
 		return false
 	}
 	if s.win.servedAddrs[addr] {
@@ -566,7 +567,7 @@ func (s *Sensor) Status() map[string]interface{} {
 		"lifetimeHours": s.state.Lifetime().Hours(), "warmupMinutes": s.state.Warmup.Minutes(),
 		"activation": s.state.Activation, "slots": slots, "muted": s.mutedTypes(),
 		"glucoseMode": s.glucose.Describe(), "bondMode": s.bondMode.String(),
-		"bondPending": s.pendingBonds(now), "dexcomApp": DexcomApp.Load(),
+		"bondPending": s.pendingBonds(now), "dexcomApp": DexcomApp.Load(), "stopped": s.stopped,
 	}
 	if r := s.state.latest(); r != nil {
 		out["latest"] = r
@@ -603,6 +604,22 @@ func (s *Sensor) SetMuted(displayType byte, muted bool) {
 	} else {
 		delete(s.muted, displayType)
 	}
+}
+
+// SetStopped takes the sensor off the air (or puts it back): no advertising and no new links,
+// and the transports drop the open ones, so no display hears it, as if it were out of range of
+// everything. Readings go on being made, so a display gets backfill once it is back. Lasts until
+// started again or the emulator restarts.
+func (s *Sensor) SetStopped(stopped bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stopped = stopped
+}
+
+func (s *Sensor) Stopped() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopped
 }
 
 func (s *Sensor) mutedTypes() []int {

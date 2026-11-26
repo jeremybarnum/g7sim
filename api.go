@@ -26,6 +26,9 @@ import (
 //	                                settings: it must bond again before it gets glucose
 //	POST /dexcom-app {"on":true}  a simulated Dexcom app shares each link, from the next
 //	                              connection; a restart goes back to the -dexcom-app flag
+//	POST /stop     {"stopped":true}  off the air: no advertising, every link dropped, as if
+//	                                 out of range of everything; false puts it back; a restart
+//	                                 puts it back too
 //	POST /force-quit             (-transport impossible) the app's end is a force-quit:
 //	                             drop what it left lodged instead of relaunching it
 //	POST /new      {"model":"stelo","days":15,"code":"1234","serial":0,
@@ -138,6 +141,26 @@ func serveAPI(addr string, sensor *g7.Sensor, replace func(*g7.State)) {
 		}
 		g7.DexcomApp.Store(*m.On)
 		log.Printf("Dexcom-app mode: %v", *m.On)
+		writeJSON(w, sensor.Status())
+	})
+	http.HandleFunc("/stop", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST {\"stopped\":true} or {\"stopped\":false}", http.StatusMethodNotAllowed)
+			return
+		}
+		var m struct {
+			Stopped *bool `json:"stopped"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&m); err != nil || m.Stopped == nil {
+			http.Error(w, "bad stop request", http.StatusBadRequest)
+			return
+		}
+		sensor.SetStopped(*m.Stopped)
+		if *m.Stopped {
+			log.Printf("sensor stopped: off the air, links dropped")
+		} else {
+			log.Printf("sensor started again")
+		}
 		writeJSON(w, sensor.Status())
 	})
 	http.HandleFunc("/new", func(w http.ResponseWriter, r *http.Request) {

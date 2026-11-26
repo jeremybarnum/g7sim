@@ -592,9 +592,20 @@ func (r *SimRadio) tryConnect(now time.Time) {
 }
 
 func (r *SimRadio) Run() {
+	wasStopped := false
 	for range time.Tick(50 * time.Millisecond) {
 		now := time.Now()
 		mode := r.sensor.Tick(now)
+		// Stopped: drop the open link once; the sensor admits no new one.
+		if stopped := r.sensor.Stopped(); stopped != wasStopped {
+			wasStopped = stopped
+			r.mu.Lock()
+			l := r.link
+			r.mu.Unlock()
+			if stopped && l != nil {
+				l.Close()
+			}
+		}
 		r.mu.Lock()
 		changed := mode != r.mode
 		r.mode = mode

@@ -66,6 +66,8 @@ const indexHTML = `<!doctype html>
       <span class="state" id="statelabel">—</span>
     </div>
     <div class="muted" id="window" style="margin-top:10px"></div>
+    <div style="margin-top:14px"><button class="danger" id="stopSensor">Stop the sensor</button> <span class="state bad hidden" id="stoppedLabel">stopped</span></div>
+    <div class="muted" style="margin-top:6px">Stop: no advertising and every link dropped, so no phone or watch hears the sensor, as if it were out of range. Readings go on being made, so a display catches up once it is started again. Ends at Start or when the emulator restarts (a Pi reboot starts it).</div>
   </div>
 
   <div class="card">
@@ -156,7 +158,7 @@ const indexHTML = `<!doctype html>
 const TYPE = {1:"medical",2:"phone",3:"watch",4:"receiver",5:"pump"};
 const STATE = {2:["warmup","warn"],3:["excess noise","warn"],6:["ok","ok"],7:["needs calibration","warn"],
   15:["session expired","bad"],18:["temporary issue","warn"],24:["expired","bad"],25:["sensor failed","bad"],1:["stopped","bad"]};
-let kind = "sine", touched = false, serverMode = {}, watchMuted = false;
+let kind = "sine", touched = false, serverMode = {}, watchMuted = false, sensorStopped = false;
 
 function formDirty(){
   const v=+document.getElementById('value').value, st=+document.getElementById('algostate').value;
@@ -206,6 +208,8 @@ document.getElementById('forget').onclick = async()=>{ await fetch('/forget',{me
 const postBond = async body=>{ await fetch('/bond',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); refresh(); };
 document.getElementById('bondMode').onchange = e=>postBond({mode:e.target.value});
 document.getElementById('dexcomApp').onchange = async e=>{ await fetch('/dexcom-app',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({on:e.target.checked})}); refresh(); };
+document.getElementById('stopSensor').onclick = async()=>{
+  await fetch('/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({stopped:!sensorStopped})}); refresh(); };
 document.getElementById('muteWatch').onclick = async()=>{
   await fetch('/mute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({displayType:3,muted:!watchMuted})}); refresh(); };
 
@@ -238,6 +242,9 @@ async function refresh(){
     if(g.periodMinutes!=null) document.getElementById('period').value=g.periodMinutes;
     document.getElementById('algostate').value = g.algorithmState||0; }
   updateApply();
+  sensorStopped = !!s.stopped;
+  document.getElementById('stopSensor').textContent = sensorStopped ? 'Start the sensor' : 'Stop the sensor';
+  document.getElementById('stoppedLabel').classList.toggle('hidden', !sensorStopped);
   const muted = s.muted||[]; watchMuted = muted.includes(3);
   document.getElementById('muteWatch').textContent = watchMuted ? 'Unmute the watch' : 'Mute the watch';
   const tb = document.getElementById('slots'); const keys = Object.keys(s.slots||{});
