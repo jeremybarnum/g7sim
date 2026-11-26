@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"time"
 )
@@ -84,6 +85,11 @@ type Slot struct {
 	Key      []byte    `json:"key"`
 	LastSeen time.Time `json:"lastSeen"`
 	Misses   int       `json:"misses"`
+	// Unbonded is a key whose display has no Bluetooth bond with the sensor: its pairing ended
+	// before the display's system paired, or the display forgot the sensor in its Bluetooth
+	// settings. The key still authenticates (verdict 05 01 02) but the sensor serves no glucose
+	// until the display bonds. A state file from before this field reads as bonded.
+	Unbonded bool `json:"unbonded,omitempty"`
 }
 
 type Calibration struct {
@@ -114,6 +120,10 @@ type Sensor struct {
 	rejections  int
 	lockedUntil time.Time
 	addrTypes   map[string]byte // display type each address last authenticated as
+	muted       map[byte]bool   // display types refused every reading, as if out of range; not saved
+
+	bondMode    BondMode
+	bondPending map[byte]*bondRequest // display types whose system is showing the Pair prompt
 }
 
 func NewSensor(state *State, path string, timing Timing) *Sensor {
@@ -121,11 +131,13 @@ func NewSensor(state *State, path string, timing Timing) *Sensor {
 		state.Identity = NewSensorIdentity(state.Serial)
 	}
 	s := &Sensor{
-		Timing:    timing,
-		state:     state,
-		path:      path,
-		glucose:   NewGlucoseModel(state),
-		addrTypes: map[string]byte{},
+		Timing:      timing,
+		state:       state,
+		path:        path,
+		glucose:     NewGlucoseModel(state),
+		addrTypes:   map[string]byte{},
+		muted:       map[byte]bool{},
+		bondPending: map[byte]*bondRequest{},
 	}
 	s.fillReadings(time.Now())
 	return s
@@ -217,6 +229,11 @@ func (s *Sensor) Tick(now time.Time) AdvertMode {
 		// minute calls have ended; nothing on the air.
 		return AdvertOff
 	}
+	// A muted display must hear nothing, as if out of range: a connection it is then refused
+	// still wakes it. So once the phone has its reading the sensor goes quiet.
+	if len(s.muted) > 0 && w.servedTypes[DisplayPhone] {
+		return AdvertOff
+	}
 	if now.Before(s.burstEnd(now)) {
 		return AdvertFull
 	}
@@ -263,7 +280,7 @@ func (s *Sensor) burstEnd(now time.Time) time.Time {
 	}
 	missing, extended := false, false
 	for typ, slot := range s.state.Slots {
-		if s.isHeld(slot, now) && !w.servedTypes[typ] {
+		if s.isHeld(slot, now) && !w.servedTypes[typ] && !s.muted[typ] {
 			missing = true
 			if slot.Misses < t.ExtendedWindows {
 				extended = true
@@ -342,12 +359,50 @@ func (s *Sensor) LinkClosed(now time.Time) {
 	s.win.lastClose = now
 }
 
+// ObserverDisplay picks the display a client that does not authenticate rides, when its link
+// cannot say: the phone's, unless the phone's display already collected this window's reading
+// from another address, then the watch's. So a phone and a watch that both only observe (each
+// riding its own Dexcom app) both get the reading, as with a real sensor. Not the watch's when
+// a client of ours authenticated as the watch holds its key: that watch is not riding a Dexcom
+// app, so a second observer is the phone again (its address changed), and the phone's reading
+// must not be booked to the watch.
+func (s *Sensor) ObserverDisplay(addr string) byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if t, ok := s.addrTypes[addr]; ok && s.win != nil && s.win.servedAddrs[addr] {
+		return t
+	}
+	watchKey := s.state.Slots[DisplayWatch] != nil && s.state.Slots[DisplayWatch].Key != nil
+	if s.win != nil && s.win.servedTypes[DisplayPhone] && !s.win.servedTypes[DisplayWatch] && !watchKey {
+		return DisplayWatch
+	}
+	return DisplayPhone
+}
+
+// AppSession records the simulated Dexcom app's session for a display: the app paired with the
+// sensor, so it holds that display's slot, and the sensor settles into its grid instead of
+// advertising as never paired. Its key is the app's, not a client's: a client of ours that
+// authenticates as that display finds no key it knows and pairs with the code.
+func (s *Sensor) AppSession(displayType byte, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.Slots[displayType] == nil {
+		s.state.Slots[displayType] = &Slot{LastSeen: now}
+		s.save()
+	}
+}
+
 // AdmitDisplay is the check at the client's challenge, once its display type
 // is known.
+
 func (s *Sensor) AdmitDisplay(addr string, displayType byte, now time.Time, mode AdvertMode) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.addrTypes[addr] = displayType
+	if s.muted[displayType] {
+		log.Printf("%s: display type %d is muted; dropping", addr, displayType)
+		return false
+	}
 	if s.win != nil && s.win.servedTypes[displayType] {
 		log.Printf("%s: display type %d already collected reading %d; dropping", addr, displayType, s.win.index)
 		return false
@@ -372,7 +427,7 @@ type AuthVerdict struct{ Status, Detail byte }
 
 var (
 	verdictBonded         = AuthVerdict{0x01, 0x01}
-	verdictPaired         = AuthVerdict{0x01, 0x00}
+	verdictNotBonded      = AuthVerdict{0x01, 0x02} // authenticated, no Bluetooth bond
 	verdictMismatch       = AuthVerdict{0x02, 0x01}
 	verdictTypeRestricted = AuthVerdict{0x02, 0x02}
 	verdictNoAppKey       = AuthVerdict{0x02, 0x03}
@@ -387,17 +442,21 @@ func (s *Sensor) Authenticated(addr string, displayType byte, newKey []byte, now
 	if newKey != nil {
 		// A completed key exchange means the client has the pairing code and
 		// physical possession, so it takes the slot, replacing any earlier
-		// key for this display type.
-		s.state.Slots[displayType] = &Slot{Key: newKey, LastSeen: now}
+		// key for this display type. A new key has no bond yet: a real G7
+		// answers 05 01 02 and the display's system pairs at the bond request.
+		s.state.Slots[displayType] = &Slot{Key: newKey, LastSeen: now, Unbonded: true}
 		s.rejections = 0
 		s.save()
-		return verdictPaired
+		return verdictNotBonded
 	}
 	if slot == nil {
 		return s.reject(verdictNoAppKey, now)
 	}
 	slot.LastSeen = now
 	s.rejections = 0
+	if slot.Unbonded {
+		return verdictNotBonded
+	}
 	return verdictBonded
 }
 
@@ -498,14 +557,16 @@ func (s *Sensor) Status() map[string]interface{} {
 	for t, slot := range s.state.Slots {
 		slots[fmt.Sprint(t)] = map[string]interface{}{
 			"lastSeen": slot.LastSeen, "held": s.isHeld(slot, now), "misses": slot.Misses,
+			"bonded": !slot.Unbonded,
 		}
 	}
 	out := map[string]interface{}{
 		"name": s.Name(), "serial": s.state.Serial, "code": s.state.Code,
 		"model": s.Model(), "days": s.state.Days,
 		"lifetimeHours": s.state.Lifetime().Hours(), "warmupMinutes": s.state.Warmup.Minutes(),
-		"activation": s.state.Activation, "slots": slots,
-		"glucoseMode": s.glucose.Describe(),
+		"activation": s.state.Activation, "slots": slots, "muted": s.mutedTypes(),
+		"glucoseMode": s.glucose.Describe(), "bondMode": s.bondMode.String(),
+		"bondPending": s.pendingBonds(now), "dexcomApp": DexcomApp.Load(),
 	}
 	if r := s.state.latest(); r != nil {
 		out["latest"] = r
@@ -529,6 +590,28 @@ func (s *Sensor) SetGlucoseMode(m GlucoseMode) {
 	s.glucose.SetMode(m)
 	s.state.Glucose = m
 	s.save()
+}
+
+// SetMuted refuses (or again admits) one display type, so it misses readings while the others
+// collect them: the sensor stops advertising once the phone has its reading, and never extends a
+// window for a muted display. Lasts until the emulator restarts.
+func (s *Sensor) SetMuted(displayType byte, muted bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if muted {
+		s.muted[displayType] = true
+	} else {
+		delete(s.muted, displayType)
+	}
+}
+
+func (s *Sensor) mutedTypes() []int {
+	out := []int{}
+	for t := range s.muted {
+		out = append(out, int(t))
+	}
+	sort.Ints(out)
+	return out
 }
 
 // ForgetSlots drops every display's key, as a sensor replaced in place would.

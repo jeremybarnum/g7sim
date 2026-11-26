@@ -627,7 +627,7 @@ func (r *SimRadio) Run() {
 		}
 		// The Dexcom app connects once for each reading: an app listening for connection events
 		// hears the link come up, and may join it.
-		if w := r.sensor.Window(); g7.DexcomApp && connEvents && c != nil && mode != g7.AdvertOff && w >= 0 && w != r.appWindow {
+		if w := r.sensor.Window(); g7.DexcomApp.Load() && connEvents && c != nil && mode != g7.AdvertOff && w >= 0 && w != r.appWindow {
 			r.appWindow = w
 			log.Printf("the Dexcom app connects for reading %d: connection event to the listening apps", w)
 			c.send(map[string]interface{}{"type": "connectionEvent", "id": r.id, "event": 1, "name": r.sensor.Name()})

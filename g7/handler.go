@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"log"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,15 +20,18 @@ const (
 	handshakeTimeout = 65 * time.Second // outlasts the client's own 60 s pairing deadline
 	sessionIdle      = 6 * time.Second  // close once the client stops asking
 	certMTU          = 20               // the certificate characteristic streams in 20-byte chunks
-	dexcomAppWait    = 2 * time.Second  // a client that has written nothing by then only observes
+	defaultKeepAlive = 30 * time.Second // a keep-alive that names no time
 )
+
+// keepAliveGrace is how long past the keep-alive the sensor hangs up (about 1 s on 11-24).
+var keepAliveGrace = time.Second
 
 // DexcomApp has a simulated Dexcom app share each link, as the Dexcom app on a phone or a
 // watch does: a client that does not authenticate itself (stock G7SensorKit, which only
 // observes the app's session) sees the sensor authenticated and bonded, then the reading and
 // the recent backfill the app's session brings. A client that authenticates itself is served
-// as before.
-var DexcomApp bool
+// as before. It can be switched while running; a link follows the setting it started under.
+var DexcomApp atomic.Bool
 
 // AppDisplay is implemented by a link that knows which device's Dexcom app it rides:
 // DisplayPhone or DisplayWatch. Without it, the phone's.
@@ -60,6 +64,7 @@ type handler struct {
 	displayType byte
 	served      bool
 	subscribed  map[Char]bool // the characteristics the client listens to
+	holdUntil   time.Time     // how long the display's last keep-alive holds the link
 }
 
 func newHandler(sensor *Sensor, link Link, mode AdvertMode) Handler {
@@ -97,15 +102,17 @@ func (h *handler) Subscribed(c Char) {
 func (h *handler) Closed() { close(h.done) }
 
 func (h *handler) protocol() {
-	wait := handshakeTimeout
-	if DexcomApp {
-		wait = dexcomAppWait
+	if DexcomApp.Load() {
+		observer, ok := h.observes()
+		if !ok {
+			return
+		}
+		if observer {
+			h.observed()
+			return
+		}
 	}
-	first, ok := h.waitAuth(wait)
-	if !ok && DexcomApp && !h.gone() {
-		h.observed()
-		return
-	}
+	first, ok := h.waitAuth(handshakeTimeout)
 	if !ok || len(first) == 0 {
 		return
 	}
@@ -118,14 +125,20 @@ func (h *handler) protocol() {
 		if !ok {
 			return
 		}
-		if !h.challenge(challenge, true) {
+		if _, ok := h.challenge(challenge, true); !ok {
 			return
 		}
 		if !h.certificatePhase() || !h.keyChallenge() || !h.finalize() {
 			return
 		}
 	case opAuthChallengeTx: // a reconnect opens straight with the challenge
-		if !h.challenge(first, false) {
+		bonded, ok := h.challenge(first, false)
+		if !ok {
+			return
+		}
+		// A key with no bond (05 01 02): the display runs the certificate phase and asks to
+		// bond again, as G7SensorKit does after a bond was lost.
+		if !bonded && (!h.certificatePhase() || !h.keyChallenge() || !h.finalize()) {
 			return
 		}
 	default:
@@ -192,17 +205,19 @@ func (h *handler) keyExchange(first []byte) bool {
 
 // MARK: - AES challenge
 
-func (h *handler) challenge(msg []byte, fresh bool) bool {
+// challenge runs the AES challenge and reports whether the client's key was accepted, and
+// whether its display is bonded.
+func (h *handler) challenge(msg []byte, fresh bool) (bonded, ok bool) {
 	if len(msg) < 10 || msg[0] != opAuthChallengeTx {
 		log.Printf("%s: malformed challenge %x", h.link.Addr(), msg)
-		return false
+		return false, false
 	}
 	clientChallenge := msg[1:9]
 	h.displayType = msg[9]
 	now := time.Now()
 
 	if !h.sensor.AdmitDisplay(h.link.Addr(), h.displayType, now, h.mode) {
-		return false
+		return false, false
 	}
 
 	var key, newKey []byte
@@ -227,31 +242,32 @@ func (h *handler) challenge(msg []byte, fresh bool) bool {
 	h.link.Notify(CharAuth, resp)
 	if key == nil {
 		log.Printf("%s: no key for display type %d; client will re-pair", h.link.Addr(), h.displayType)
-		return false
+		return false, false
 	}
 
-	answer, ok := h.waitAuth(handshakeTimeout)
-	if !ok {
-		return false
+	answer, got := h.waitAuth(handshakeTimeout)
+	if !got {
+		return false, false
 	}
 	if len(answer) < 9 || answer[0] != opAuthAnswer {
-		return false
+		return false, false
 	}
 	if !bytes.Equal(answer[1:9], EncryptChallenge(sensorChallenge, key)) {
 		v := h.sensor.Rejected(verdictMismatch)
 		h.link.Notify(CharAuth, []byte{opAuthStatus, v.Status, v.Detail})
 		log.Printf("%s: challenge answer did not match", h.link.Addr())
-		return false
+		return false, false
 	}
 
 	v := h.sensor.Authenticated(h.link.Addr(), h.displayType, newKey, now)
 	h.link.Notify(CharAuth, []byte{opAuthStatus, v.Status, v.Detail})
 	if v.Status != 0x01 {
 		log.Printf("%s: refused (status %02x detail %02x)", h.link.Addr(), v.Status, v.Detail)
-		return false
+		return false, false
 	}
-	log.Printf("%s: authenticated as display type %d", h.link.Addr(), h.displayType)
-	return true
+	bonded = v == verdictBonded
+	log.Printf("%s: authenticated as display type %d (bonded: %v)", h.link.Addr(), h.displayType, bonded)
+	return bonded, true
 }
 
 // MARK: - Certificate exchange (fresh pairing only)
@@ -332,22 +348,50 @@ func (h *handler) keyChallenge() bool {
 
 // MARK: - Finalize
 
+// finalize answers the display's keep-alive (06 xx) and its bond request (07).
+//
+// The display may write the keep-alive more than once before it asks to bond: Dexcom's watch
+// app, woken in the background by a new sensor, writes 06 FA, posts a notification asking the
+// person to open the app, and leaves the link idle (34 s in the 11-25 capture) until the tap;
+// then it writes 06 1E and 07 with the app in front, where the system shows its Pair prompt.
+// G7SensorKit writes 06 1E and 07 at once.
+//
+// The byte after 06 is taken as the seconds the sensor holds the link (0x1E = 30, 0xFA = 250).
+// That is inferred, not proven: it fits the idle link above and the 11-24 captures, where an
+// unanswered Pair prompt after 06 1E ended about 31 s later.
 func (h *handler) finalize() bool {
-	msg, ok := h.waitAuth(handshakeTimeout)
-	if !ok || len(msg) == 0 || msg[0] != opFinalize {
-		return false
+	wait := handshakeTimeout
+	for {
+		msg, ok := h.waitAuth(wait)
+		if !ok || len(msg) == 0 {
+			if h.holdUntil != (time.Time{}) && !h.gone() {
+				log.Printf("%s: no bond request before the keep-alive ran out; hanging up", h.link.Addr())
+			}
+			return false
+		}
+		switch msg[0] {
+		case opFinalize:
+			hold := defaultKeepAlive
+			if len(msg) >= 2 && msg[1] != 0 {
+				hold = time.Duration(msg[1]) * time.Second
+			}
+			h.holdUntil = time.Now().Add(hold + keepAliveGrace)
+			wait = hold + keepAliveGrace
+			h.link.Notify(CharAuth, []byte{opFinalize, 0x00})
+			log.Printf("%s: keep-alive %x: holding the link %v for the bond request", h.link.Addr(), msg, hold)
+		case opBondRequest:
+			if h.holdUntil == (time.Time{}) {
+				return false // a bond request with no keep-alive before it
+			}
+			h.link.Notify(CharAuth, []byte{opBondRequest, 0x00})
+			log.Printf("%s: paired; bond requested", h.link.Addr())
+			// A real G7 sends its Bluetooth security request now and 08 01 once the link is encrypted.
+			return h.bond()
+		default:
+			log.Printf("%s: expected the keep-alive or the bond request, got %x", h.link.Addr(), msg)
+			return false
+		}
 	}
-	h.link.Notify(CharAuth, []byte{opFinalize, 0x1E})
-
-	msg, ok = h.waitAuth(handshakeTimeout)
-	if !ok || len(msg) == 0 || msg[0] != opBondRequest {
-		return false
-	}
-	h.link.Notify(CharAuth, []byte{opBondRequest, 0x00})
-	// The sensor confirms the bond; the client treats this as optional.
-	h.link.Notify(CharAuth, []byte{opBondConfirmed, 0x00})
-	log.Printf("%s: paired", h.link.Addr())
-	return true
 }
 
 // MARK: - Session
@@ -423,14 +467,48 @@ func (h *handler) handleControl(msg []byte) {
 
 // MARK: - The Dexcom app's session, for a client that only observes
 
+// observes tells, in Dexcom-app mode, a client that only observes the app's session from one
+// that authenticates itself. G7SensorKit authenticating listens to the certificate
+// characteristic, then the authentication one, then writes its challenge; observing, it listens
+// to the authentication characteristic alone. A real sensor needs no such test (each display
+// authenticates with its own key); this one stands in for the app sharing the link. It replaced
+// a 2 s guess that took a slow, suspended client for an observer and left its pairing
+// unanswered.
+func (h *handler) observes() (observer, ok bool) {
+	deadline := time.Now().Add(handshakeTimeout)
+	for {
+		m, got := h.readNext(time.Until(deadline))
+		if !got {
+			return false, false
+		}
+		switch {
+		case m.subscribed && m.char == CharCertificate:
+			return false, true
+		case m.subscribed && m.char == CharAuth:
+			return !h.subscribed[CharCertificate], true
+		case m.subscribed:
+		case m.char == CharAuth:
+			h.authQ = append(h.authQ, m.data)
+			return false, true
+		case m.char == CharCertificate:
+			h.certBuf = append(h.certBuf, m.data...)
+		case m.char == CharControl:
+			h.ctrlQ = append(h.ctrlQ, m.data)
+		}
+	}
+}
+
 // observed plays the Dexcom app's session on the link: its authentication shows as
 // authenticated and bonded, then its reading and the last hour's backfill arrive, and the app
 // hangs up.
 func (h *handler) observed() {
 	now := time.Now()
-	h.displayType = DisplayPhone
 	if a, ok := h.link.(AppDisplay); ok {
 		h.displayType = a.AppDisplay()
+	} else {
+		// Over real Bluetooth a link cannot say which device it is on: the first observer in a
+		// window is the phone's Dexcom app, another one the watch's.
+		h.displayType = h.sensor.ObserverDisplay(h.link.Addr())
 	}
 	if !h.sensor.AdmitDisplay(h.link.Addr(), h.displayType, now, h.mode) {
 		return
@@ -447,6 +525,7 @@ func (h *handler) observed() {
 		return
 	}
 	h.link.Notify(CharControl, GlucoseMessage(r, sensorNow))
+	h.sensor.AppSession(h.displayType, now)
 	h.sensor.Served(h.link.Addr(), h.displayType, now)
 	h.served = true
 	log.Printf("%s: served reading at %d as the Dexcom app's session (display type %d)", h.link.Addr(), r.Time, h.displayType)
