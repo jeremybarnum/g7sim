@@ -2,6 +2,7 @@ package gatt
 
 import (
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"sync"
@@ -52,6 +53,38 @@ func (c *central) Close() error {
 
 func (c *central) MTU() int {
 	return int(c.mtu)
+}
+
+// SecurityChannel is implemented by a Central whose link carries the Security
+// Manager channel (L2CAP channel 6). The stack itself cannot pair: this only
+// passes the channel's PDUs, so a server can send a Security Request and see
+// what the central's system answers (linux/smp.go).
+type SecurityChannel interface {
+	// WriteSMP sends one Security Manager PDU to the central.
+	WriteSMP(pdu []byte) error
+	// HandleSMP has f called with each PDU the central sends. With none
+	// set, every pairing PDU is declined: pairing not supported.
+	HandleSMP(f func(pdu []byte))
+}
+
+type smpConn interface {
+	WriteSMP(pdu []byte) (int, error)
+	SetSMPHandler(f func(pdu []byte))
+}
+
+func (c *central) WriteSMP(pdu []byte) error {
+	s, ok := c.l2conn.(smpConn)
+	if !ok {
+		return errors.New("no security manager channel on this link")
+	}
+	_, err := s.WriteSMP(pdu)
+	return err
+}
+
+func (c *central) HandleSMP(f func(pdu []byte)) {
+	if s, ok := c.l2conn.(smpConn); ok {
+		s.SetSMPHandler(f)
+	}
 }
 
 func (c *central) loop() {

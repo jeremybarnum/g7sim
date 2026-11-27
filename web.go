@@ -120,9 +120,9 @@ const indexHTML = `<!doctype html>
     <div style="margin-top:14px"><label><input type="checkbox" id="dexcomApp"> Dexcom-app mode</label></div>
     <div class="muted" style="margin-top:6px">A simulated Dexcom app shares each link: a client that only listens (Loop with the Dexcom app on the phone) gets readings without the code. It tells every phone in range that a Dexcom app authenticated, so keep phones that must not adopt this sensor away. From the next connection; off again after a restart unless started with -dexcom-app.</div>
     <div style="margin-top:14px">Bluetooth bond at pairing:
-      <select id="bondMode"><option value="off">bonds at once</option><option value="refuse">refused (app not in front)</option><option value="ask">ask: wait for Pair</option></select></div>
+      <select id="bondMode"><option value="off">bonds at once</option><option value="refuse">refused (app not in front)</option><option value="ask">ask: wait for Pair</option><option value="request">request: the device decides</option></select></div>
     <div id="bondPending" style="margin-top:8px"></div>
-    <div class="muted" style="margin-top:6px">A real G7 serves no glucose until the display's system pairs. Refused: the sensor hangs up 0.2 s after its bond request. Ask: the link is held for Pair as long as the display's keep-alive says (about 31 s after 06 1E), as a person must tap it on the device.</div>
+    <div class="muted" style="margin-top:6px">A real G7 serves no glucose until the display's system pairs. Refused: the sensor hangs up 0.2 s after its bond request. Ask: the link is held for Pair as long as the display's keep-alive says (about 31 s after 06 1E), as a person must tap it on the device. Request: the emulator sends a real Bluetooth security request, and the phone or watch itself refuses (app not in front) or shows its Pair alert (app in front); tap Pair there. The emulator still cannot pair, so the device's pairing ends as failed after the tap and the link stays unencrypted.</div>
     <div style="margin-top:14px"><button id="muteWatch">Mute the watch</button></div>
     <div class="muted" style="margin-top:6px">A muted display is refused every reading, as if out of range; the others still collect. Ends when unmuted or the emulator restarts.</div>
     <div style="margin-top:14px"><button class="danger" id="forget">Forget all keys</button></div>
@@ -255,7 +255,8 @@ async function refresh(){
   document.getElementById('dexcomApp').checked = !!s.dexcomApp;
   const bm = document.getElementById('bondMode'); if(document.activeElement!==bm) bm.value = s.bondMode||'off';
   document.getElementById('bondPending').innerHTML = (s.bondPending||[]).map(p=>
-    '<button onclick="postBond({accept:'+p.displayType+'})">Pair on the '+(TYPE[p.displayType]||p.displayType)+'</button> <span class="muted">'+p.secondsLeft+' s left</span>').join(' ');
+    (p.onDevice ? 'The '+(TYPE[p.displayType]||p.displayType)+' should be showing its own Pair alert. ' : '')
+    +'<button onclick="postBond({accept:'+p.displayType+'})">'+(p.onDevice ? 'Pair from here instead' : 'Pair on the '+(TYPE[p.displayType]||p.displayType))+'</button> <span class="muted">'+p.secondsLeft+' s left</span>').join(' ');
 }
 const PRESET = {10:{lifetime:240, warmup:27}, 15:{lifetime:360, warmup:62}};
 const field = id=>document.getElementById(id);

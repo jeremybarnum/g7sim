@@ -7,7 +7,7 @@ import (
 )
 
 // bareHandler is a handler with no protocol goroutine, so a test can drive one step.
-func bareHandler(s *Sensor, link *fakeLink, displayType byte) *handler {
+func bareHandler(s *Sensor, link Link, displayType byte) *handler {
 	return &handler{
 		sensor: s, link: link, mode: AdvertFull,
 		in: make(chan inMsg, 64), done: make(chan struct{}), finished: make(chan struct{}),
@@ -231,6 +231,9 @@ func TestKeepAliveHoldsTheLinkUntilALaterBondRequest(t *testing.T) {
 	}
 	h.in <- inMsg{char: CharAuth, data: []byte{opBondRequest}}
 	expectNotify(t, link, CharAuth, []byte{opBondRequest, 0x00})
+	for len(pendingBonds(s)) == 0 { // the prompt goes up just after 07 00
+		time.Sleep(5 * time.Millisecond)
+	}
 	if got := s.AcceptBond(DisplayWatch); len(got) != 1 {
 		t.Fatalf("accepted %v", got)
 	}
@@ -261,7 +264,7 @@ func TestKeepAliveRunsOutWithoutABondRequest(t *testing.T) {
 }
 
 func TestParseBondMode(t *testing.T) {
-	for _, n := range []string{"off", "refuse", "ask"} {
+	for _, n := range []string{"off", "refuse", "ask", "request"} {
 		m, err := ParseBondMode(n)
 		if err != nil || m.String() != n {
 			t.Fatalf("%s: %v %v", n, m, err)

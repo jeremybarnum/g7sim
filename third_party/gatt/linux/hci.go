@@ -350,6 +350,7 @@ func (h *HCI) handleDisconnectionComplete(b []byte) error {
 	delete(h.conns, hh)
 	c.released()
 	close(c.aclc)
+	close(c.smpc)
 	h.setAdvertiseEnable(true)
 	return nil
 }
@@ -367,7 +368,7 @@ func (h *HCI) handleLEMeta(b []byte) error {
 	// case evt.LELTKRequest:
 	// case evt.LERemoteConnectionParameterRequest:
 	default:
-		return fmt.Errorf("Unhandled LE event: %s, [ % X ]", code, b)
+		return fmt.Errorf("Unhandled LE event: 0x%02X, [ % X ]", int(code), b)
 	}
 	return nil
 }
@@ -385,19 +386,10 @@ func (h *HCI) handleL2CAP(b []byte) error {
 		log.Printf("l2conn: got data for disconnected handle: 0x%04x", a.attr)
 		return nil
 	}
-	if len(a.b) < 4 {
-		log.Printf("l2conn: l2cap packet is too short/corrupt, length is %d", len(a.b))
-		return nil
-	}
-	cid := uint16(a.b[2]) | (uint16(a.b[3]) << 8)
-	if cid == 5 {
-		c.handleSignal(a)
-		return nil
-	}
-	c.aclc <- a
+	c.route(a)
 	return nil
 }
 
 func (h *HCI) trace(fmt string, v ...interface{}) {
-	log.Printf(fmt, v)
+	log.Printf(fmt, v...)
 }

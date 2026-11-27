@@ -46,13 +46,69 @@ type conn struct {
 	cmu      sync.Mutex
 	inflight int
 	closed   bool
+
+	// rxCID is the channel of the L2CAP PDU now arriving: only its first
+	// fragment names one. Touched by the HCI read loop alone.
+	rxCID uint16
+
+	// The Security Manager channel (smp.go).
+	smpBuf     []byte
+	smpLen     int
+	smpc       chan []byte
+	smu        sync.Mutex
+	smpHandler func(pdu []byte)
 }
 
+// The fixed L2CAP channels of an LE link.
+const (
+	cidATT    = 0x0004
+	cidSignal = 0x0005
+	cidSMP    = 0x0006
+)
+
 func newConn(hci *HCI, hh uint16) *conn {
-	return &conn{
+	c := &conn{
 		hci:  hci,
 		attr: hh,
 		aclc: make(chan *aclData),
+		smpc: make(chan []byte, 8),
+	}
+	go c.smpLoop()
+	return c
+}
+
+// route hands one ACL packet from the controller to its channel: signaling
+// (5), the Security Manager (6), or the attribute protocol (everything else,
+// as before). Only the first fragment of an L2CAP PDU carries the header that
+// names the channel, so a continuation follows its first fragment. (The
+// channel used to be read out of every packet, which took two payload bytes
+// of a continuation for it and dropped a continuation shorter than a header.)
+func (c *conn) route(a *aclData) {
+	if a.flags&0x3 == 0x1 { // a continuing fragment
+		switch c.rxCID {
+		case 0:
+			log.Printf("l2conn: continuation with no PDU open on 0x%04x, dropped", c.attr)
+		case cidSignal:
+		case cidSMP:
+			c.smpFragment(a.b)
+		default:
+			c.aclc <- a
+		}
+		return
+	}
+	if len(a.b) < 4 {
+		log.Printf("l2conn: l2cap packet is too short/corrupt, length is %d", len(a.b))
+		c.rxCID = 0
+		return
+	}
+	c.rxCID = uint16(a.b[2]) | (uint16(a.b[3]) << 8)
+	switch c.rxCID {
+	case cidSignal:
+		c.handleSignal(a)
+	case cidSMP:
+		c.smpStart(a.b)
+	default:
+		c.aclc <- a
 	}
 }
 

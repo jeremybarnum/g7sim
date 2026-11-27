@@ -21,6 +21,15 @@ type Link interface {
 	Close()
 }
 
+// SecurityLink is implemented by a link that reaches the Bluetooth security manager of the
+// display's system (the link's L2CAP channel 6): a Bluetooth adapter does, the iOS Simulator's
+// socket does not. The messages are Security Manager PDUs, opcode first.
+type SecurityLink interface {
+	SendSMP(pdu []byte) error
+	// OnSMP has f called with each message the display's system sends, in order.
+	OnSMP(f func(pdu []byte))
+}
+
 // Handler is the sensor's side of one connection. The BLE layer calls it
 // from that connection's own goroutine, in the order the central's writes
 // arrived, so an implementation needs no locking of its own.

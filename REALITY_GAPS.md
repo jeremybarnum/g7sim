@@ -22,6 +22,13 @@ Status: open unless marked otherwise. Candidates for one pull request.
     the sensor hangs up about 0.2 s later;
   - the system shows its Pair prompt (app in front) and nobody answers: the sensor hangs up about 31 s after its
     Pairing Response (error 719 on the watch).
+  On the link's security channel (L2CAP channel 6) the messages are: the sensor's Security Request `0B 09` (bond,
+  LE Secure Connections, no protection against a man in the middle); from the watch in the background, Pairing
+  Failed `05 08` (unspecified reason); from the watch with the app in front, a Pairing Request
+  `01 00 00 09 10 03 03` 3 ms after the request, answered by the sensor's Pairing Response `02 03 00 09 10 02 03`
+  0.15 s later. bluetoothd logs "Displaying pairing request alert" on receiving that response, not on the Security
+  Request. The watch sends its public key only when the person taps Pair (3 ms after the tap); public keys,
+  confirm, random and key check follow in 0.2 s, then the link is encrypted and identity keys are exchanged.
   An unbonded display gets no glucose. Its key is not thrown away at once: in direct mode the same never-bonded key
   was accepted again (`05 01 02`, then a new bond request) 44 s to 2 min 54 s later, at every connection until it
   bonded; with the Dexcom app on the phone it was refused 4 min 22 s and 14 min 48 s after a failed bond, and the
@@ -46,14 +53,33 @@ Status: open unless marked otherwise. Candidates for one pull request.
 - **Hid:** every emulator run from mid-October showed the watch's first contact succeeding from behind the clock,
   which led to wait screens that tell the user nothing is needed. G7SensorKit itself has carried the rule since
   10-23 (the "Sensor Pairing Not Finished" alert).
-- **Fixed (e1434a6), as a setting:** `-bond off|refuse|ask`, `POST /bond`, and a control in the web page's
+- **Fixed (e1434a6), as a setting:** `-bond off|refuse|ask|request`, `POST /bond`, and a control in the web page's
   "Display slots" card. Default *off* bonds at once, so unattended pairings in the test rig keep working. *refuse*
   hangs up 0.2 s after `07 00` and serves nothing (the app not in front). *ask* holds the link for Pair from the
   API or the page (about 31 s after `06 1E`), then sends `08 01` and serves. Every new key now gets `05 01 02`; an unbonded key is kept and gets
   `05 01 02` at the next connection, and the display bonds again. "Forget bond" plays a display forgetting the
-  sensor in its Bluetooth settings. Still open: the key-discard rule (here a key never lapses), one-minute
-  connections for an unbonded display (gap 13), and two levels not built: *request* (Pi only: a real security
-  request, the real device decides) and *full* (real LE Secure Connections pairing in the emulator's stack).
+  sensor in its Bluetooth settings.
+- **Level *request* (Pi only):** after `07 00` the emulator sends the sensor's real Security Request (`0B 09`) and
+  the phone's or watch's own system decides, for as long as the keep-alive holds the link:
+  - it answers Pairing Failed (the app not in front): the emulator logs the reason, hangs up 0.2 s later and serves
+    nothing, as *refuse* does;
+  - it answers with a Pairing Request (the app in front): the emulator sends the sensor's Pairing Response, on
+    which the system shows its Pair alert. Nobody answers: the emulator hangs up when the keep-alive runs out.
+    Cancel (the system sends Pairing Failed): it hangs up 0.2 s later. Pair: the system's public key arrives;
+    the emulator cannot pair, so it declines the rest with Pairing Failed (reason 0x05, pairing not supported),
+    then sends `08 01` and serves, as *ask* does after Pair. While the alert shows, Pair from the page or the API
+    also counts ("Pair from here instead");
+  - it never answers: the emulator hangs up when the keep-alive runs out.
+  The emulator makes no key and encrypts nothing: its stack now carries the security channel's messages (they
+  used to be read as attribute requests) and declines any pairing nobody asked for. Over the Simulator's socket
+  there is no security channel, and *request* behaves as *ask*.
+  **Differs from a real G7 at this level:** the pairing on the device ends as failed after the tap, the link is
+  never encrypted, and the sensor never appears in the device's Bluetooth settings. **Not yet seen on a device
+  (unit tests only):** whether the watch and the iPhone treat the emulator's request as they do the sensor's; what
+  they show, and whether they hang up, when the pairing is declined after the tap; what Cancel sends.
+- **Still open:** the key-discard rule (here a key never lapses), one-minute connections for an unbonded display
+  (gap 13), and the level not built: *full* (real LE Secure Connections pairing in the emulator's stack, with
+  stored keys and encrypted links).
 
 ### 1a. The keep-alive and a held bond request (fixed)
 

@@ -20,7 +20,8 @@ import (
 //	POST /mute     {"displayType":3,"muted":true}
 //	               refuse one display type (2 phone, 3 watch) every reading until
 //	               unmuted or restarted
-//	POST /bond     {"mode":"ask"}   the display's Bluetooth bond: off, refuse or ask
+//	POST /bond     {"mode":"ask"}   the display's Bluetooth bond: off, refuse, ask or
+//	                                request (a real Security Request; Bluetooth adapter only)
 //	               {"accept":3}     tap Pair on that display's prompt (0: any showing)
 //	               {"forget":3}     that display forgets the sensor in its Bluetooth
 //	                                settings: it must bond again before it gets glucose

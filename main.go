@@ -109,7 +109,7 @@ func main() {
 	simulator := flag.String("simulator", "", "the app's simulator (name or UDID), for -relaunch and -suspend")
 	relaunch := flag.Bool("relaunch", false, "relaunch a terminated app for its lodged connect, as iOS does")
 	suspendApp := flag.Bool("suspend", false, "stop the app while iOS would have it suspended, waking it for Bluetooth events")
-	bond := flag.String("bond", "off", "the display's Bluetooth bond at the end of a pairing: off (bonds at once), refuse (its system refuses, as an iPhone or Apple Watch with the app not in front: hang up, no glucose) or ask (hold the link for Pair from the API or web page, as long as the display's keep-alive says: about 31 s after 06 1E). The mode can be changed at run time")
+	bond := flag.String("bond", "off", "the display's Bluetooth bond at the end of a pairing: off (bonds at once), refuse (its system refuses, as an iPhone or Apple Watch with the app not in front: hang up, no glucose), ask (hold the link for Pair from the API or web page, as long as the display's keep-alive says: about 31 s after 06 1E) or request (-transport ble only: send a real Bluetooth Security Request and let the display's own system refuse, or show its Pair prompt; the emulator still cannot pair, so the link stays unencrypted). The mode can be changed at run time")
 	dylib := flag.String("dylib", "", "ImpossiBLE library injected into a relaunched app (default: simulator/build/libImpossiBLE.dylib beside g7sim)")
 	flag.Parse()
 	g7.DexcomApp.Store(*dexcomApp)

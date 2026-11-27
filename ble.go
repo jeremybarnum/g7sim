@@ -64,6 +64,22 @@ func (l *link) Close() {
 	l.central.Close()
 }
 
+// SendSMP and OnSMP reach the Bluetooth security manager of the display's system, for the
+// sensor's Security Request (g7.SecurityLink). The adapter's stack only carries the messages.
+func (l *link) SendSMP(pdu []byte) error {
+	s, ok := l.central.(gatt.SecurityChannel)
+	if !ok {
+		return errors.New("no security manager channel")
+	}
+	return s.WriteSMP(pdu)
+}
+
+func (l *link) OnSMP(f func(pdu []byte)) {
+	if s, ok := l.central.(gatt.SecurityChannel); ok {
+		s.HandleSMP(f)
+	}
+}
+
 func (l *link) run() {
 	for e := range l.events {
 		if e.subscribed {
