@@ -122,7 +122,12 @@ const indexHTML = `<!doctype html>
     <div style="margin-top:14px">Bluetooth bond at pairing:
       <select id="bondMode"><option value="off">bonds at once</option><option value="refuse">refused (app not in front)</option><option value="ask">ask: wait for Pair</option><option value="request">request: the device decides</option></select></div>
     <div id="bondPending" style="margin-top:8px"></div>
-    <div class="muted" style="margin-top:6px">A real G7 serves no glucose until the display's system pairs. Refused: the sensor hangs up 0.2 s after its bond request. Ask: the link is held for Pair as long as the display's keep-alive says (about 31 s after 06 1E), as a person must tap it on the device. Request: the emulator sends a real Bluetooth security request, and the phone or watch itself refuses (app not in front) or shows its Pair alert (app in front); tap Pair there. The emulator still cannot pair, so the device's pairing ends as failed after the tap and the link stays unencrypted.</div>
+    <div class="muted" style="margin-top:6px">A real G7 gives a phone or watch no glucose until that device's own system has paired with it. This setting plays that step for a device with a new key.<br>
+      <b>Bonds at once:</b> no pairing step. For unattended runs.<br>
+      <b>Refused:</b> as with the app not in front. The emulator hangs up 0.2 s after the app asks to bond. No glucose.<br>
+      <b>Ask:</b> no alert on the device. The emulator holds the link for "Pair" on this page, as long as the app's keep-alive says (about 31 s), then serves glucose.<br>
+      <b>Request:</b> the emulator sends the sensor's real pairing request and the device decides. App in front: its own Pair alert appears; tap Pair there, and glucose follows. If the device refuses (app not in front), or nobody answers in about 31 s, the emulator hangs up.<br>
+      At every level the link stays unencrypted: the emulator cannot finish a Bluetooth pairing.</div>
     <div style="margin-top:14px"><button id="muteWatch">Mute the watch</button></div>
     <div class="muted" style="margin-top:6px">A muted display is refused every reading, as if out of range; the others still collect. Ends when unmuted or the emulator restarts.</div>
     <div style="margin-top:14px"><button class="danger" id="forget">Forget all keys</button></div>
