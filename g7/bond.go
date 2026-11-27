@@ -225,8 +225,9 @@ func (h *handler) askForPair() bool {
 //   - it refuses (Pairing Failed, as an iPhone or Apple Watch does with its app not in front), or
 //     ends the pairing while its prompt shows (Cancel): hang up 0.2 s later, no glucose;
 //   - it sends a Pairing Request and gets the sensor's Pairing Response, on which it shows its
-//     Pair prompt. Its public key then says the person tapped Pair. The emulator cannot pair, so
-//     it declines the rest and goes on as bonded, on a link that is not encrypted;
+//     Pair prompt. Its public key then says the system accepted the pairing, which in every run
+//     so far followed a tap on Pair. The emulator cannot pair, so it declines the rest and goes on
+//     as bonded, on a link that is not encrypted;
 //   - nobody answers the prompt, or the system never answers the request: hang up.
 //
 // While the prompt shows, Pair from the page or the API also counts, as at the ask level.
@@ -271,7 +272,7 @@ func (h *handler) requestPairing(security SecurityLink) bool {
 						addr, display, time.Until(h.holdUntil).Round(time.Second), display)
 				}
 			case pairingAccepted:
-				log.Printf("%s: Pair tapped on display type %d (its system sent its public key); the rest of the pairing was declined, the link stays unencrypted",
+				log.Printf("%s: Pair accepted on display type %d (its system sent its public key); the rest of the pairing was declined, the link stays unencrypted",
 					addr, display)
 				return true
 			}

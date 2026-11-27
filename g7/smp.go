@@ -25,8 +25,9 @@ import (
 // keys, so the pairing is "just works": the prompt offers Pair and Cancel and nothing to compare.
 //
 // This level sends the Security Request and the Pairing Response, which are fixed bytes, and
-// stops there: it makes no key and encrypts nothing. The display's public key says the person
-// tapped Pair; the rest of the pairing is declined with Pairing Failed, "pairing not supported".
+// stops there: it makes no key and encrypts nothing. The display's public key says its system
+// accepted the pairing (the person tapped Pair); the rest is declined with Pairing Failed,
+// "pairing not supported".
 // Real pairing in the emulator's stack is the level after this one.
 
 // Security Manager opcodes.
@@ -160,7 +161,7 @@ type pairingStep int
 
 const (
 	pairingPrompted pairingStep = iota // it sent a Pairing Request and has the sensor's response: its Pair prompt shows
-	pairingAccepted                    // it sent its public key: the person tapped Pair
+	pairingAccepted                    // it sent its public key: its system accepted the pairing
 	pairingRefused                     // it sent Pairing Failed
 )
 
