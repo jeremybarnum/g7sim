@@ -78,12 +78,12 @@ Status: open unless marked otherwise. Candidates for one pull request.
   Apple Watch, Loop in front, emulator log):** the watch answered the emulator's request 60 ms later with the same
   Pairing Request it sent the real sensor, sent its public key 7.7 s later (Pair tapped), and after the declined
   pairing kept the link and read glucose and backfill in the same connection. **Second run (11-27 09:12, same watch, on the clock face, its bond
-  forgotten on the emulator):** the watch wrote `06 FA`, then `06 1E` and `07` 24.5 s later (21 s in the first
-  run). Its system did not refuse: it sent its Pairing Request and showed the Pair alert on the clock face, 34 s
-  after the reading; Pair followed 3.6 s later, then glucose. On 11-24 the same watch refused a real sensor's
-  request 24 times out of 24 with the app not in front. Why it did not refuse here is a question about the watch
-  (the app's state when it asked to bond), not about the request; the watch's system log is needed. **Not yet
-  seen:** the refusal with the app not in front, Cancel, an unanswered alert, the iPhone.
+  forgotten on the emulator):** the watch wrote `06 FA` and Loop posted its own alert; when the person raised the
+  wrist and Loop came to the front, 24.5 s later, it wrote `06 1E` and `07`, and the system showed its Pair alert
+  (34 s after the reading). Pair followed 3.6 s later, then glucose. This is the app holding its bond request
+  until it is in front (gap 1a), so the system had nothing to refuse; the 21 s gap in the first run is the same
+  wait. **Not yet seen:** a refusal (it needs a client that asks to bond while not in front, which this watch
+  build does not do), Cancel, an unanswered alert, the iPhone.
 - **Still open:** the key-discard rule (here a key never lapses), one-minute connections for an unbonded display
   (gap 13), and the level not built: *full* (real LE Secure Connections pairing in the emulator's stack, with
   stored keys and encrypted links).
