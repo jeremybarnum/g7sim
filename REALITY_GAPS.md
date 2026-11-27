@@ -74,9 +74,12 @@ Status: open unless marked otherwise. Candidates for one pull request.
   used to be read as attribute requests) and declines any pairing nobody asked for. Over the Simulator's socket
   there is no security channel, and *request* behaves as *ask*.
   **Differs from a real G7 at this level:** the pairing on the device ends as failed after the tap, the link is
-  never encrypted, and the sensor never appears in the device's Bluetooth settings. **Not yet seen on a device
-  (unit tests only):** whether the watch and the iPhone treat the emulator's request as they do the sensor's; what
-  they show, and whether they hang up, when the pairing is declined after the tap; what Cancel sends.
+  never encrypted, and the sensor never appears in the device's Bluetooth settings. **Seen on a device (11-27 09:07,
+  Apple Watch, Loop in front, emulator log):** the watch answered the emulator's request 60 ms later with the same
+  Pairing Request it sent the real sensor, sent its public key 7.7 s later (Pair tapped), and after the declined
+  pairing kept the link and read glucose and backfill in the same connection. **Not yet seen:** the refusal with
+  the app not in front, Cancel, an unanswered alert, the iPhone, and what the watch's system records for the
+  declined pairing.
 - **Still open:** the key-discard rule (here a key never lapses), one-minute connections for an unbonded display
   (gap 13), and the level not built: *full* (real LE Secure Connections pairing in the emulator's stack, with
   stored keys and encrypted links).
