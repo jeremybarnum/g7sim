@@ -125,8 +125,8 @@ const indexHTML = `<!doctype html>
     <div class="muted" style="margin-top:6px">A real G7 gives a phone or watch no glucose until that device's own system has paired with it. This setting plays that step for a device with a new key.<br>
       <b>Bonds at once:</b> no pairing step. For unattended runs.<br>
       <b>Refused:</b> as with the app not in front. The emulator hangs up 0.2 s after the app asks to bond. No glucose.<br>
-      <b>Ask:</b> no alert on the device. The emulator holds the link for "Pair" on this page, as long as the app's keep-alive says (about 31 s), then serves glucose.<br>
-      <b>Request:</b> the emulator sends the sensor's real pairing request and the device decides. App in front: its own Pair alert appears; tap Pair there, and glucose follows. If the device refuses (app not in front), or nobody answers in about 31 s, the emulator hangs up.<br>
+      <b>Ask:</b> you stand in for the device. No alert appears on it; a "Pair" button appears on this page instead. Click it within the time the app's keep-alive gives (about 31 s) and the emulator serves glucose; otherwise it hangs up.<br>
+      <b>Request:</b> the closest to a real new sensor. The emulator sends the sensor's real pairing request and the device decides. App in front: its own Pair alert appears; tap Pair there, and glucose follows. If the device refuses (app not in front), or nobody answers in about 31 s, the emulator hangs up.<br>
       At every level the link stays unencrypted: the emulator cannot finish a Bluetooth pairing.</div>
     <div style="margin-top:14px"><button id="muteWatch">Mute the watch</button></div>
     <div class="muted" style="margin-top:6px">A muted display is refused every reading, as if out of range; the others still collect. Ends when unmuted or the emulator restarts.</div>
